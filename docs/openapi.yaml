@@ -1,0 +1,1759 @@
+openapi: 3.0.3
+info:
+  title: Q-Wash API
+  description: >
+    Car-washing queue API: phone + SMS-OTP auth, washing point / service
+    CRUD, capacity-aware booking availability, a live queue board, and
+    booking history. See `docs/API.md` in the repo for the full prose
+    contract and `docs/DATA_MODEL.md` for the schema and algorithms this
+    spec is generated alongside.
+  version: "1.0.0"
+servers:
+  - url: /
+    description: Same-origin (this server also hosts the docs page)
+
+tags:
+  - name: Meta
+    description: Operational endpoints not under /api/v1.
+  - name: Auth
+    description: Phone + SMS-OTP login, no passwords. JWT access tokens, opaque rotating refresh tokens.
+  - name: Users
+    description: The authenticated caller's own profile.
+  - name: Washing points
+    description: Physical locations, each with a configurable number of parallel wash boxes.
+  - name: Services
+    description: What a washing point offers, each with one or more price options (e.g. by car size).
+  - name: Cars
+    description: A customer's own cars — ownership-scoped, not role-gated.
+  - name: Queue
+    description: Availability, booking, cancellation, staff status transitions, and history.
+  - name: Notifications
+    description: Staff-sent messages to a customer, delivered through the same channel as OTP.
+  - name: Owners
+    description: Businesses that own one or more washing points. Admin-only — contact info isn't public.
+  - name: Connection requests
+    description: The admin app's onboarding queue for prospective washing-point owners. Admin-only.
+  - name: Admin
+    description: Network-wide views (richer washing-point list, dashboard aggregates) for the admin app. Admin-only.
+  - name: Photos
+    description: Photos attached to a washing point's listing. Reads are public; writes require staff/admin, scoped to their own point.
+  - name: Schedule
+    description: Per-weekday operating hours, replacing the flat open_time/close_time columns as the source of truth for booking. Reads are public; writes require staff/admin, scoped to their own point.
+
+security: []
+
+paths:
+  /health:
+    get:
+      tags: [Meta]
+      operationId: health
+      summary: Liveness/readiness check
+      description: Public. Pings the DB; 200 if reachable, 503 (still `ok`/`degraded` body) otherwise.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: DB unreachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /api/v1/auth/otp/request:
+    post:
+      tags: [Auth]
+      operationId: requestOtp
+      summary: Request an OTP code
+      description: >
+        Public. Generates a 6-digit code, bcrypt-hashes it for storage, and
+        sends it via the configured `sms.Sender` (a stdout stub in dev — the
+        code never appears in the response). Rate-limited: 429
+        `otp_cooldown` if an unconsumed code for that phone was issued
+        within the last `OTP_COOLDOWN` (default 60s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone_number: { type: string, example: "+15551234567", description: E.164 format }
+              required: [phone_number]
+      responses:
+        "202":
+          description: Code generated and "sent"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, example: otp_sent } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/otp/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyOtp
+      summary: Verify an OTP code and receive tokens
+      description: >
+        Public. Finds-or-creates the user for that phone number (new users
+        default to role `customer`), then issues an access/refresh token
+        pair. 400 `otp_invalid`/`otp_expired`; 429 `otp_locked` after
+        `OTP_MAX_ATTEMPTS` (default 5) wrong tries on the same code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone_number: { type: string, example: "+15551234567" }
+                code: { type: string, example: "123456", minLength: 6, maxLength: 6 }
+              required: [phone_number, code]
+      responses:
+        "200":
+          description: Token pair issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: passwordLogin
+      summary: Username/password login (staff/admin only)
+      description: >
+        Public (the credential itself is the auth). For the queue board and
+        staff panel, not the customer flow — customers stay phone+OTP.
+        401 `invalid_credentials` covers both a wrong password and an
+        unknown username, deliberately the same code for both so a client
+        can't enumerate valid usernames. 403 `forbidden` if the credentials
+        are correct but the account isn't `staff`/`admin`. There is no
+        endpoint to set a username/password — see `docs/DATA_MODEL.md`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string, example: staff }
+                password: { type: string, format: password, example: staff12345 }
+              required: [username, password]
+      responses:
+        "200":
+          description: Token pair issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshToken
+      summary: Rotate a refresh token
+      description: >
+        Public (the refresh token itself is the credential). The presented
+        token is revoked and a new pair is issued in one step, so reuse of
+        an already-rotated token is a detectable 401. 400
+        `refresh_token_required` if missing; 401 `invalid_refresh_token` if
+        unknown/expired/already-revoked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { refresh_token: { type: string } }
+              required: [refresh_token]
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Revoke a refresh token (or all of the caller's)
+      description: >
+        Requires auth. Body is optional: `{refresh_token}` revokes that one
+        session; an empty/omitted body revokes every active refresh token
+        for the caller. Idempotent — revoking an already-revoked or foreign
+        token is a no-op, not an error.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { refresh_token: { type: string } }
+      responses:
+        "204": { description: Revoked (or already was) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/me:
+    get:
+      tags: [Users]
+      operationId: getMe
+      summary: Current user profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Users]
+      operationId: updateMe
+      summary: Update the current user's display name
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { name: { type: string, minLength: 1, maxLength: 255 } }
+              required: [name]
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/washing-points:
+    get:
+      tags: [Washing points]
+      operationId: listWashingPoints
+      summary: List washing points
+      description: Public. Returns points of any status, ordered by name.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WashingPointList" }
+    post:
+      tags: [Washing points]
+      operationId: createWashingPoint
+      summary: Create a washing point
+      description: >
+        Requires role `admin`. Staff get 403 — creating a point directly
+        bypasses the connection-request onboarding flow, so it's reserved
+        for admin; staff go through `POST /connection-requests` + approval
+        instead.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WashingPointCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WashingPoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/washing-points/{id}:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Washing points]
+      operationId: getWashingPoint
+      summary: Get a washing point
+      description: Public.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WashingPoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Washing points]
+      operationId: updateWashingPoint
+      summary: Partially update a washing point
+      description: >
+        Requires role `staff` or `admin`. Any subset of the create fields
+        plus `status`; the merged record is re-validated (e.g.
+        `close_time` must stay after `open_time`). Staff may only act on
+        their own washing point (`User.washing_point_id`) — 404 for any
+        other point, same as a nonexistent id. Admin has no such
+        restriction.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WashingPointUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WashingPoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Washing points]
+      operationId: deactivateWashingPoint
+      summary: Deactivate a washing point
+      description: >
+        Requires role `staff` or `admin`. Sets `status=paused`; the row is
+        never deleted. Same own-washing-point-only restriction on staff as
+        the PATCH operation.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deactivated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/availability:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Washing points]
+      operationId: getAvailability
+      summary: Bookable time windows for a service on a date
+      description: >
+        Public. Stepped every 15 minutes across the requested date's
+        resolved per-weekday schedule window(s) (see GET/PUT
+        .../schedule) — two disjoint windows on a day with a break, none
+        on a closed day. A slot appears only if the service's
+        duration_minutes fits before the window's close and at least one
+        box is free for the whole [start, end); available_boxes lists
+        which ones, for the client to offer a box choice. Timestamps are
+        anchored to the fixed Asia/Dushanbe business timezone, not UTC.
+      parameters:
+        - name: service_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date, example: "2026-08-06" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvailabilityList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Schedule]
+      operationId: getSchedule
+      summary: Get a washing point's per-weekday schedule
+      description: Public. Exactly 7 rows, ordered by weekday (0=Monday..6=Sunday).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+    put:
+      tags: [Schedule]
+      operationId: replaceSchedule
+      summary: Bulk-replace a washing point's full-week schedule
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. Atomically replaces all 7 rows (not a per-weekday upsert) —
+        exactly one row per weekday 0..6 is required. open_time/close_time
+        are required when is_open is true; break_start/break_end are
+        optional but must both be set or both omitted, and must fall
+        within open_time/close_time.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleReplace" }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/photos:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Photos]
+      operationId: listPhotos
+      summary: List a washing point's photos
+      description: Public. Ordered by sort_order then created_at.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhotoList" }
+    post:
+      tags: [Photos]
+      operationId: uploadPhoto
+      summary: Upload a photo
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff (404 for another point, same as a nonexistent id). The
+        uploaded bytes are content-sniffed server-side; only JPEG/PNG/GIF/
+        WebP are accepted (image/svg+xml is deliberately rejected — an SVG
+        can embed a script, which would be a stored-XSS vector if served
+        back as-is). The first photo for a point always becomes the cover
+        regardless of is_cover; a later is_cover=true unsets any existing
+        cover first.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                is_cover: { type: string, enum: ["true", "false"], default: "false" }
+              required: [file]
+      responses:
+        "201":
+          description: Uploaded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Photo" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { description: File exceeds the 10MB limit }
+
+  /api/v1/washing-points/{id}/photos/{photoId}:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+      - name: photoId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Photos]
+      operationId: updatePhoto
+      summary: Set cover / reorder a photo
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. is_cover=true promotes it, unsetting the previous cover;
+        there's no way to unset the sole cover directly.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PhotoUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Photo" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Photos]
+      operationId: deletePhoto
+      summary: Delete a photo
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. If the deleted photo was the cover and others remain, the
+        oldest remaining one is auto-promoted.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/queue:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: getQueueBoard
+      summary: Live queue board for a washing point
+      description: >
+        Requires role `staff` or `admin`, scoped to their own washing
+        point for staff (404 `washing_point_not_found` for another point).
+        Bookings with status `queue`/`waiting`/`washing`, ordered by
+        `scheduled_start_at`. A separate, display-oriented shape from
+        `Booking` — built for a shared/public-facing screen, so it omits
+        `user_id`/`car_id` and never exposes a full phone number (only the
+        last 4 digits).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BoardItemList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/washing-points/{id}/services:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Services]
+      operationId: listServices
+      summary: List services at a washing point
+      description: Public. Each service includes its nested `price_options`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceList" }
+    post:
+      tags: [Services]
+      operationId: createService
+      summary: Create a service
+      description: >
+        Requires role `staff` or `admin`, scoped to their own washing point
+        for staff (404 for another point, same as a nonexistent id).
+        `price_options` must be non-empty; if none is marked `is_default`,
+        the first is auto-promoted; more than one marked default is 400
+        `multiple_default_price_options`.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServiceCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/services/{id}:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    get:
+      tags: [Services]
+      operationId: getService
+      summary: Get a service
+      description: Public.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Services]
+      operationId: updateService
+      summary: Partially update a service
+      description: >
+        Requires role `staff` or `admin`, scoped to their own washing point
+        for staff. Updates the service's own fields only — not its price
+        options.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServiceUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Services]
+      operationId: deactivateService
+      summary: Deactivate a service
+      description: >
+        Requires role `staff` or `admin`, scoped to their own washing point
+        for staff. Sets `is_active=false`.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deactivated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/services/{id}/price-options:
+    parameters:
+      - $ref: "#/components/parameters/serviceId"
+    post:
+      tags: [Services]
+      operationId: addPriceOption
+      summary: Add a price option to a service
+      description: >
+        Requires role `staff` or `admin`, scoped to their own washing point
+        for staff. If `is_default: true`, any existing default for that
+        service is unset first.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PriceOptionCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceOption" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/price-options/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Services]
+      operationId: updatePriceOption
+      summary: Partially update a price option
+      description: >
+        Requires role `staff` or `admin`, scoped to the price option's
+        parent service's washing point for staff (resolved via an extra
+        lookup, since the id alone doesn't reveal it). Explicitly setting
+        `is_default: false` on the current sole default is rejected — 400
+        `cannot_unset_default`; mark another one default instead.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PriceOptionUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceOption" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Services]
+      operationId: deletePriceOption
+      summary: Remove a price option
+      description: >
+        Requires role `staff` or `admin`, scoped to the price option's
+        parent service's washing point for staff (same extra-lookup note
+        as PATCH). 409 `last_price_option` if it's the service's only
+        option; 409 `price_option_in_use` if any booking references it. If
+        the removed option was the default, another remaining one is
+        auto-promoted.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/me/cars:
+    get:
+      tags: [Cars]
+      operationId: listMyCars
+      summary: List the caller's own cars
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CarList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Cars]
+      operationId: createCar
+      summary: Add a car
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CarCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Car" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/cars/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Cars]
+      operationId: updateCar
+      summary: Rename a car
+      description: >
+        Ownership-enforced, not role-gated: a non-owner or nonexistent id
+        both 404 `car_not_found` (never 403), so existence isn't leaked.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CarUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Car" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Cars]
+      operationId: deleteCar
+      summary: Delete a car
+      description: >
+        Ownership-enforced. 409 `car_in_use` if any booking references it;
+        otherwise a real row delete (cars have no `is_active` flag).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue:
+    get:
+      tags: [Queue]
+      operationId: listQueueNetworkWide
+      summary: Network-wide live queue board
+      description: >
+        Requires role `staff` or `admin`. Same live-board shape as
+        `GET /washing-points/{id}/queue` but not scoped to a path-level id:
+        `admin` may pass `washing_point_id` to scope it, or omit it for
+        every point at once; `staff`/`worker` are always forced to their
+        own washing point regardless of the query param.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: washing_point_id
+          in: query
+          required: false
+          description: Admin only — ignored (forced to the caller's own point) for staff/worker.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BoardItemList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Queue]
+      operationId: createBooking
+      summary: Book a queue slot
+      description: >
+        Requires auth (any role — not restricted to "customer"; a
+        staff/admin user can book for themselves too). `washing_point_id`
+        is not in the body — derived from `service_id`. `box_number` is
+        client-chosen; the overlap check happens inside a transaction that
+        locks the washing point row, so concurrent bookings for the same
+        point are fully serialized; 409 `slot_unavailable` if the requested
+        box isn't free for some instant in the requested interval. A user
+        may have at most one active (`queue`/`waiting`/`washing`) booking
+        at a time — 409 `active_booking_exists` otherwise.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookingCreate" }
+      responses:
+        "201":
+          description: Booked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Queue]
+      operationId: getBooking
+      summary: Get a booking
+      description: >
+        Owner, staff, or admin. Anyone else 404s `queue_not_found` (never
+        403 — doesn't confirm the id exists), including staff at a
+        different washing point than the booking's own.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/queue/{id}/events:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Queue]
+      operationId: streamBooking
+      summary: Live-updating stream of a booking (SSE)
+      description: >
+        Owner only (404, not 403, for a non-owner — same as getBooking).
+        text/event-stream: a `Booking` snapshot immediately, then again
+        whenever anything changes for its washing point, until the booking
+        reaches ready/canceled or the client disconnects. A `: ping`
+        comment is sent every 25s to keep the connection alive through
+        proxies. Not representable as a normal JSON response — see the
+        description for the actual event payload shape (same as Booking).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: text/event-stream of Booking snapshots
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/queue/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: cancelBooking
+      summary: Cancel a booking
+      description: >
+        Owner-only. Only allowed while status is `queue`/`waiting` — 409
+        `cannot_cancel` otherwise, including re-canceling.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Canceled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}/status:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: updateBookingStatus
+      summary: Advance a booking's status
+      description: >
+        Requires role `staff` or `admin`, scoped to the booking's own
+        washing point for staff (404 `queue_not_found` otherwise, same as
+        a nonexistent id). Forward-only, one step at a time (`queue` →
+        `waiting` → `washing` → `ready`); `ready` and `canceled` are
+        terminal. 409 `invalid_status_transition` on a skip, a backward
+        move, or any move from a terminal state.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookingStatusUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/me/queue:
+    get:
+      tags: [Queue]
+      operationId: getMyBookingHistory
+      summary: The caller's full booking history
+      description: >
+        All statuses, most-recently-scheduled first. Paginated. Only the
+        caller's own bookings — no role can see another user's history
+        through this endpoint.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaginatedBookings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/me/notifications:
+    get:
+      tags: [Notifications]
+      operationId: getMyNotifications
+      summary: The caller's own notifications
+      description: Paginated, most recently created first.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaginatedNotifications" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications:
+    post:
+      tags: [Notifications]
+      operationId: createNotification
+      summary: Send (or schedule) a notification
+      description: >
+        Requires role `staff` or `admin`. If `queue_id` is given, staff may
+        only reference a booking at their own washing point — 404
+        `queue_not_found` otherwise. If `send_at` is due (omitted, or
+        now/past), sends immediately through the same `sms.Sender` used for
+        OTP and persists the outcome (`status: sent`/`failed`). A future
+        `send_at` just creates the row as `pending` — there is no
+        background worker yet to pick it up later. The call always
+        succeeds once the row is created, regardless of delivery outcome.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationCreate" }
+      responses:
+        "201":
+          description: Created (and possibly sent)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/owners:
+    get:
+      tags: [Owners]
+      operationId: listOwners
+      summary: List owners
+      description: Requires role admin. Ordered by name.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OwnerList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Owners]
+      operationId: createOwner
+      summary: Create an owner
+      description: Requires role admin.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OwnerCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Owner" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/owners/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Owners]
+      operationId: getOwner
+      summary: Get an owner
+      description: Requires role admin.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Owner" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Owners]
+      operationId: updateOwner
+      summary: Partially update an owner
+      description: Requires role admin. Any subset of the create fields.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OwnerUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Owner" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/connection-requests:
+    get:
+      tags: [Connection requests]
+      operationId: listConnectionRequests
+      summary: List connection requests
+      description: Requires role admin. Newest first.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [new, approved, rejected] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionRequestList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Connection requests]
+      operationId: createConnectionRequest
+      summary: Submit a connection request
+      description: >
+        Requires role admin — admin-created for now, no public self-service
+        "apply" form yet.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConnectionRequestCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionRequest" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/connection-requests/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Connection requests]
+      operationId: getConnectionRequest
+      summary: Get a connection request
+      description: Requires role admin.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Connection requests]
+      operationId: reviewConnectionRequest
+      summary: Approve or reject a connection request
+      description: >
+        Requires role admin. The only write on an existing request — no
+        editing the submitted fields. 409
+        `connection_request_already_reviewed` if not still `new`.
+        Approving creates an Owner (reusing one whose contact_phone matches,
+        if any) and a WashingPoint with status=pending_review and
+        placeholder latitude/longitude of 0,0 (the request doesn't collect
+        coordinates) — an admin must set them via PATCH
+        /washing-points/{id} before the point can go live.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConnectionRequestReview" }
+      responses:
+        "200":
+          description: Reviewed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionRequest" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/admin/washing-points:
+    get:
+      tags: [Admin]
+      operationId: listAdminWashingPoints
+      summary: Network-wide washing-point list with owner and service counts
+      description: >
+        Requires role admin. Richer than the public GET /washing-points:
+        adds owner_id/owner_name and services_count (active services only).
+        boxes_count remains the point's box capacity, not a count of Box
+        rows (the Box entity doesn't exist yet).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminWashingPointList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/stats:
+    get:
+      tags: [Admin]
+      operationId: getAdminStats
+      summary: Network-wide dashboard aggregates
+      description: >
+        Requires role admin. "Today" is a calendar day in the Asia/Dushanbe
+        business timezone. average_utilization is booked box-minutes today
+        divided by available box-minutes today (boxes_count x open-hours,
+        summed over active points) — a coarse ratio until per-weekday
+        schedules and per-box open/closed state land in later phases.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStats" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Access token from OTP verify/refresh, e.g. `Authorization: Bearer <token>`"
+
+  parameters:
+    washingPointId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    serviceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    page:
+      name: page
+      in: query
+      description: 1-indexed. Invalid/out-of-range values clamp to the default rather than erroring.
+      schema: { type: integer, minimum: 1, default: 1 }
+    pageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing, malformed, or invalid/expired credentials
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not permitted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found (or hidden as not-found to avoid leaking existence)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: State conflict (e.g. slot no longer available, invalid transition)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate-limited
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+      required: [status]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: invalid_name }
+            message: { type: string, example: "name is required (max 255 chars)" }
+          required: [code, message]
+      required: [error]
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        phone_number: { type: string, example: "+15551234567" }
+        name: { type: string, nullable: true }
+        role: { type: string, enum: [customer, staff, admin, worker] }
+        washing_point_id: { type: string, format: uuid, nullable: true }
+        last_login_at: { type: string, format: date-time, nullable: true }
+      required: [id, phone_number, role]
+
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+      required: [access_token, access_token_expires_at, refresh_token, refresh_token_expires_at, user]
+
+    WashingPoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        address: { type: string }
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+        boxes_count: { type: integer, minimum: 1 }
+        open_time: { type: string, example: "08:00" }
+        close_time: { type: string, example: "20:00" }
+        status: { type: string, enum: [active, paused, pending_review] }
+        description: { type: string, nullable: true }
+        amenities: { type: array, items: { type: string } }
+      required: [id, name, address, latitude, longitude, boxes_count, open_time, close_time, status]
+
+    WashingPointList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WashingPoint" } }
+      required: [items]
+
+    WashingPointCreate:
+      type: object
+      properties:
+        owner_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 255 }
+        address: { type: string, maxLength: 500 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        boxes_count: { type: integer, minimum: 1, default: 2 }
+        open_time: { type: string, default: "08:00", example: "08:00" }
+        close_time: { type: string, default: "20:00", example: "20:00" }
+        status: { type: string, enum: [active, paused, pending_review], default: active }
+        description: { type: string }
+        amenities: { type: array, items: { type: string } }
+      required: [name, address, latitude, longitude]
+
+    WashingPointUpdate:
+      type: object
+      properties:
+        owner_id:
+          type: string
+          description: A uuid to set, or "" to clear.
+        name: { type: string, maxLength: 255 }
+        address: { type: string, maxLength: 500 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        boxes_count: { type: integer, minimum: 1 }
+        open_time: { type: string }
+        close_time: { type: string }
+        status: { type: string, enum: [active, paused, pending_review] }
+        description: { type: string }
+        amenities: { type: array, items: { type: string } }
+
+    PriceOption:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        price_cents: { type: integer, minimum: 0 }
+        is_default: { type: boolean }
+      required: [id, name, price_cents, is_default]
+
+    PriceOptionInput:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        price_cents: { type: integer, minimum: 0 }
+        is_default: { type: boolean, default: false }
+      required: [name, price_cents]
+
+    PriceOptionCreate:
+      allOf:
+        - $ref: "#/components/schemas/PriceOptionInput"
+
+    PriceOptionUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        price_cents: { type: integer, minimum: 0 }
+        is_default:
+          type: boolean
+          description: Explicitly setting false on the current sole default is rejected (400 cannot_unset_default).
+
+    Service:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        washing_point_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        duration_minutes: { type: integer, minimum: 1 }
+        picture_url: { type: string, nullable: true }
+        is_active: { type: boolean }
+        price_options:
+          type: array
+          items: { $ref: "#/components/schemas/PriceOption" }
+      required: [id, washing_point_id, name, duration_minutes, is_active, price_options]
+
+    ServiceList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Service" } }
+      required: [items]
+
+    ServiceCreate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 2000 }
+        duration_minutes: { type: integer, minimum: 1 }
+        picture_url: { type: string, maxLength: 500 }
+        price_options:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/PriceOptionInput" }
+      required: [name, duration_minutes, price_options]
+
+    ServiceUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 2000 }
+        duration_minutes: { type: integer, minimum: 1 }
+        picture_url: { type: string, maxLength: 500 }
+        is_active: { type: boolean }
+
+    Car:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+      required: [id, name]
+
+    CarList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Car" } }
+      required: [items]
+
+    CarCreate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+      required: [name]
+
+    CarUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+      required: [name]
+
+    Booking:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queue, waiting, washing, ready, canceled] }
+        user_id: { type: string, format: uuid }
+        car_id: { type: string, format: uuid }
+        service_id: { type: string, format: uuid }
+        price_option_id: { type: string, format: uuid }
+        washing_point_id: { type: string, format: uuid }
+        box_number: { type: integer, minimum: 1 }
+        scheduled_start_at: { type: string, format: date-time }
+        scheduled_end_at: { type: string, format: date-time }
+        notes: { type: string, nullable: true }
+        canceled_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        cars_ahead:
+          type: integer
+          minimum: 0
+          description: >
+            Count of other bookings at the same washing point with status
+            queue/waiting/washing and an earlier scheduled_start_at. 0 once
+            this booking itself reaches ready/canceled. Never reveals which
+            bookings they are.
+      required:
+        [id, status, user_id, car_id, service_id, price_option_id, washing_point_id, box_number,
+         scheduled_start_at, scheduled_end_at, created_at, cars_ahead]
+
+    BoardItem:
+      type: object
+      description: >
+        Display-oriented view of a live booking for the staff queue board —
+        deliberately narrower than Booking (no user_id/car_id, no full
+        phone number) since this is meant for a shared/public-facing screen.
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queue, waiting, washing] }
+        box_number: { type: integer, minimum: 1 }
+        scheduled_start_at: { type: string, format: date-time }
+        scheduled_end_at: { type: string, format: date-time }
+        customer_phone_last4: { type: string, example: "0003", description: "Last 4 digits only, never the full phone number." }
+        car_name: { type: string, example: "Demo Car" }
+      required: [id, status, box_number, scheduled_start_at, scheduled_end_at, customer_phone_last4]
+
+    BoardItemList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/BoardItem" } }
+      required: [items]
+
+    PaginatedBookings:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Booking" } }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+      required: [items, page, page_size, total]
+
+    BookingCreate:
+      type: object
+      properties:
+        car_id: { type: string, format: uuid }
+        service_id: { type: string, format: uuid }
+        price_option_id: { type: string, format: uuid }
+        box_number:
+          type: integer
+          minimum: 1
+          description: >
+            Client-chosen box (see the washing point's boxes_count and the
+            availability endpoint's available_boxes). The server validates
+            it is free for the requested window but never auto-assigns it.
+        scheduled_start_at: { type: string, format: date-time }
+        notes: { type: string, maxLength: 2000 }
+      required: [car_id, service_id, price_option_id, box_number, scheduled_start_at]
+
+    BookingStatusUpdate:
+      type: object
+      properties:
+        status: { type: string, enum: [waiting, washing, ready] }
+      required: [status]
+
+    AvailabilitySlot:
+      type: object
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        available_boxes:
+          type: array
+          items: { type: integer, minimum: 1 }
+          description: Specific box numbers free for the whole [start, end) window.
+      required: [start, end, available_boxes]
+
+    AvailabilityList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AvailabilitySlot" } }
+      required: [items]
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        queue_id: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [pending, sent, failed] }
+        channel: { type: string, enum: [sms] }
+        text: { type: string }
+        send_at: { type: string, format: date-time }
+        sent_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, user_id, status, channel, text, send_at, created_at]
+
+    PaginatedNotifications:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+      required: [items, page, page_size, total]
+
+    NotificationCreate:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        queue_id: { type: string, format: uuid }
+        text: { type: string, minLength: 1, maxLength: 2000 }
+        send_at: { type: string, format: date-time, description: Defaults to now if omitted }
+      required: [user_id, text]
+
+    Owner:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        contact_name: { type: string, nullable: true }
+        contact_phone: { type: string, nullable: true }
+        contact_email: { type: string, nullable: true }
+      required: [id, name]
+
+    OwnerList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Owner" } }
+      required: [items]
+
+    OwnerCreate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        contact_name: { type: string, maxLength: 255 }
+        contact_phone: { type: string, maxLength: 32 }
+        contact_email: { type: string, maxLength: 255 }
+      required: [name]
+
+    OwnerUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        contact_name: { type: string, maxLength: 255 }
+        contact_phone: { type: string, maxLength: 32 }
+        contact_email: { type: string, maxLength: 255 }
+
+    ConnectionRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        business_name: { type: string }
+        contact_name: { type: string }
+        contact_phone: { type: string }
+        address: { type: string }
+        boxes_count: { type: integer, minimum: 1 }
+        note: { type: string, nullable: true }
+        status: { type: string, enum: [new, approved, rejected] }
+        reviewed_by: { type: string, format: uuid, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, business_name, contact_name, contact_phone, address, boxes_count, status, created_at]
+
+    ConnectionRequestList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ConnectionRequest" } }
+      required: [items]
+
+    ConnectionRequestCreate:
+      type: object
+      properties:
+        business_name: { type: string, maxLength: 255 }
+        contact_name: { type: string, maxLength: 255 }
+        contact_phone: { type: string, maxLength: 32 }
+        address: { type: string, maxLength: 500 }
+        boxes_count: { type: integer, minimum: 1 }
+        note: { type: string, maxLength: 2000 }
+      required: [business_name, contact_name, contact_phone, address, boxes_count]
+
+    ConnectionRequestReview:
+      type: object
+      properties:
+        status: { type: string, enum: [approved, rejected] }
+      required: [status]
+
+    AdminWashingPoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string, format: uuid, nullable: true }
+        owner_name: { type: string, nullable: true }
+        name: { type: string }
+        address: { type: string }
+        status: { type: string, enum: [active, paused, pending_review] }
+        boxes_count: { type: integer, minimum: 1 }
+        services_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+      required: [id, name, address, status, boxes_count, services_count, created_at]
+
+    AdminWashingPointList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminWashingPoint" } }
+      required: [items]
+
+    AdminStats:
+      type: object
+      properties:
+        points_total: { type: integer, minimum: 0 }
+        points_active: { type: integer, minimum: 0 }
+        bookings_today: { type: integer, minimum: 0 }
+        canceled_today: { type: integer, minimum: 0 }
+        average_utilization: { type: number, format: double, minimum: 0 }
+      required: [points_total, points_active, bookings_today, canceled_today, average_utilization]
+
+    Photo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+        is_cover: { type: boolean }
+        sort_order: { type: integer, minimum: 0 }
+      required: [id, url, is_cover, sort_order]
+
+    PhotoList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Photo" } }
+      required: [items]
+
+    PhotoUpdate:
+      type: object
+      properties:
+        is_cover: { type: boolean }
+        sort_order: { type: integer, minimum: 0 }
+
+    ScheduleRow:
+      type: object
+      properties:
+        weekday: { type: integer, minimum: 0, maximum: 6, description: "0=Monday..6=Sunday" }
+        is_open: { type: boolean }
+        open_time: { type: string, example: "08:00" }
+        close_time: { type: string, example: "20:00" }
+        break_start: { type: string, nullable: true, example: "13:00" }
+        break_end: { type: string, nullable: true, example: "14:00" }
+      required: [weekday, is_open]
+
+    ScheduleList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ScheduleRow" }, minItems: 7, maxItems: 7 }
+      required: [items]
+
+    ScheduleReplace:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ScheduleRow" }, minItems: 7, maxItems: 7 }
+      required: [items]

@@ -1,0 +1,161 @@
+// Package config loads application configuration from environment variables.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	Env     string
+	HTTP    HTTPConfig
+	DB      DBConfig
+	Auth    AuthConfig
+	Storage StorageConfig
+}
+
+type HTTPConfig struct {
+	Port string
+	// CORSAllowedOrigins lets a separately-hosted frontend (different
+	// origin/port) call this API from a browser. Comma-separated in env;
+	// "*" (the default) is fine for local dev but should be locked down to
+	// specific origins in any real deployment.
+	CORSAllowedOrigins []string
+}
+
+type DBConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	Name     string
+	SSLMode  string
+}
+
+func (c DBConfig) DSN() string {
+	return fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.Name, c.SSLMode,
+	)
+}
+
+type AuthConfig struct {
+	// AccessTokenSecret signs short-lived JWT access tokens.
+	AccessTokenSecret string
+	AccessTokenTTL    time.Duration
+
+	// RefreshTokenPepper is an HMAC key used to hash opaque refresh tokens
+	// before storing/looking them up, so a leaked DB alone isn't enough to
+	// forge a valid refresh token. Refresh tokens themselves are NOT JWTs.
+	RefreshTokenPepper string
+	RefreshTokenTTL    time.Duration
+
+	OTPTTL         time.Duration
+	OTPCooldown    time.Duration // minimum time between two OTP requests for the same phone
+	OTPMaxAttempts int
+}
+
+// StorageConfig configures where uploaded photos (docs/PLAN_WEB_APPS.md
+// phase 4) are written and served from. See
+// internal/platform/storage.LocalDisk — dev-only, not multi-instance safe.
+type StorageConfig struct {
+	Dir     string
+	BaseURL string
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		Env: getEnv("APP_ENV", "development"),
+		HTTP: HTTPConfig{
+			Port:               getEnv("HTTP_PORT", "8080"),
+			CORSAllowedOrigins: getCSV("CORS_ALLOWED_ORIGINS", []string{"*"}),
+		},
+		DB: DBConfig{
+			Host:     getEnv("DB_HOST", "localhost"),
+			Port:     getEnv("DB_PORT", "5432"),
+			User:     getEnv("DB_USER", "pegasus"),
+			Password: getEnv("DB_PASSWORD", "pegasus"),
+			Name:     getEnv("DB_NAME", "pegasus"),
+			SSLMode:  getEnv("DB_SSLMODE", "disable"),
+		},
+		Auth: AuthConfig{
+			AccessTokenSecret:  getEnv("JWT_ACCESS_SECRET", "dev-access-secret-change-me"),
+			RefreshTokenPepper: getEnv("REFRESH_TOKEN_PEPPER", "dev-refresh-pepper-change-me"),
+		},
+		Storage: StorageConfig{
+			Dir:     getEnv("UPLOADS_DIR", "./uploads"),
+			BaseURL: getEnv("UPLOADS_BASE_URL", "/uploads"),
+		},
+	}
+
+	var err error
+	if cfg.Auth.AccessTokenTTL, err = getDuration("JWT_ACCESS_TTL", 15*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.RefreshTokenTTL, err = getDuration("JWT_REFRESH_TTL", 30*24*time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.OTPTTL, err = getDuration("OTP_TTL", 5*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.OTPCooldown, err = getDuration("OTP_COOLDOWN", 60*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.OTPMaxAttempts, err = getInt("OTP_MAX_ATTEMPTS", 5); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
+}
+
+func getEnv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration for %s: %w", key, err)
+	}
+	return d, nil
+}
+
+func getCSV(key string, fallback []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
+}
+
+func getInt(key string, fallback int) (int, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer for %s: %w", key, err)
+	}
+	return n, nil
+}

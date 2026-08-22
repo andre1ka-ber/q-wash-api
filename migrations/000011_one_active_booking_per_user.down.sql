@@ -1,0 +1,1 @@
+DROP INDEX queue_one_active_booking_per_user;
