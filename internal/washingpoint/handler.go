@@ -25,13 +25,22 @@ type ScheduleSeeder interface {
 	SeedDefault(ctx context.Context, washingPointID uuid.UUID, openTime, closeTime string) error
 }
 
+// BoxSeeder provisions a newly created washing point's initial boxes
+// (docs/PLAN_WEB_APPS.md phase 6), same reasoning and same
+// can't-import-internal/box-here constraint as ScheduleSeeder. Satisfied
+// structurally by *box.Manager.
+type BoxSeeder interface {
+	SeedDefault(ctx context.Context, washingPointID uuid.UUID, count int) error
+}
+
 type Handler struct {
 	repo           *Repository
 	scheduleSeeder ScheduleSeeder
+	boxSeeder      BoxSeeder
 }
 
-func NewHandler(repo *Repository, scheduleSeeder ScheduleSeeder) *Handler {
-	return &Handler{repo: repo, scheduleSeeder: scheduleSeeder}
+func NewHandler(repo *Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder) *Handler {
+	return &Handler{repo: repo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder}
 }
 
 // RegisterRoutes mounts /washing-points: reads are public, writes require
@@ -209,6 +218,13 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	// immediately — GET .../availability treats a washing point with no
 	// schedule rows as closed every day, see queue.resolveDaySchedule.
 	if err := h.scheduleSeeder.SeedDefault(r.Context(), wp.ID, openTime, closeTime); err != nil {
+		httputil.WriteError(w, r, apperror.Internal(err))
+		return
+	}
+	// Same reasoning as the schedule seed above: GET .../boxes should
+	// return boxes_count boxes immediately, not zero until someone adds
+	// them by hand through the cabinet app.
+	if err := h.boxSeeder.SeedDefault(r.Context(), wp.ID, boxesCount); err != nil {
 		httputil.WriteError(w, r, apperror.Internal(err))
 		return
 	}

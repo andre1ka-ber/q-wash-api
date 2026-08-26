@@ -39,6 +39,8 @@ tags:
     description: Photos attached to a washing point's listing. Reads are public; writes require staff/admin, scoped to their own point.
   - name: Schedule
     description: Per-weekday operating hours, replacing the flat open_time/close_time columns as the source of truth for booking. Reads are public; writes require staff/admin, scoped to their own point.
+  - name: Boxes
+    description: Individual washing bays within a point — a display label plus an open/closed flag layered on top of washing_points.boxes_count. Reads are public; writes require staff/admin, scoped to their own point.
 
 security: []
 
@@ -408,6 +410,91 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/washing-points/{id}/boxes:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Boxes]
+      operationId: listBoxes
+      summary: List a washing point's boxes
+      description: Public. Ordered by number.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BoxList" }
+    post:
+      tags: [Boxes]
+      operationId: createBox
+      summary: Add a box
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. number is always server-assigned (one past the current
+        highest for that point, 1 if none) — never client-chosen. Starts
+        is_open=true.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BoxCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Box" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/boxes/{boxId}:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+      - name: boxId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Boxes]
+      operationId: updateBox
+      summary: Rename / open / close a box
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. number can't be changed after creation. Closing a box
+        (is_open=false) drops it out of GET .../availability's
+        available_boxes for the whole day and 409s a POST /queue that
+        requests it directly.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BoxUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Box" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Boxes]
+      operationId: deleteBox
+      summary: Remove a box
+      description: >
+        Requires role staff or admin, scoped to their own washing point for
+        staff. Does not change washing_points.boxes_count — the two are
+        updated independently.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/photos:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -509,22 +596,55 @@ paths:
       operationId: getQueueBoard
       summary: Live queue board for a washing point
       description: >
-        Requires role `staff` or `admin`, scoped to their own washing
-        point for staff (404 `washing_point_not_found` for another point).
-        Bookings with status `queue`/`waiting`/`washing`, ordered by
-        `scheduled_start_at`. A separate, display-oriented shape from
+        Requires role `staff`, `worker`, or `admin` (worker added
+        docs/PLAN_WEB_APPS.md phase 7), scoped to their own washing point
+        (404 `washing_point_not_found` for another point). Bookings with
+        status `queue`/`waiting`/`washing`, ordered by `scheduled_start_at`,
+        further scoped to one calendar day (?date=, defaults to today in
+        the business timezone). A separate, display-oriented shape from
         `Booking` — built for a shared/public-facing screen, so it omits
         `user_id`/`car_id` and never exposes a full phone number (only the
         last 4 digits).
       security: [{ bearerAuth: [] }]
+      parameters:
+        - name: date
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: Defaults to today in the business timezone (Asia/Dushanbe).
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BoardItemList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/washing-points/{id}/boxes/live:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Boxes]
+      operationId: getLiveBoxes
+      summary: Worker app's box-cards view
+      description: >
+        Requires role `staff`, `worker`, or `admin`, scoped to their own
+        washing point (404 `washing_point_not_found` for another point).
+        Each box joined with whichever booking currently occupies it
+        (current, status=washing) or, if free, the earliest still-upcoming
+        one assigned to that box number (next). Not date-filtered, unlike
+        the queue board above — answers "what's happening right now".
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveBoxList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/washing-points/{id}/services:
     parameters:
@@ -894,8 +1014,12 @@ paths:
       operationId: cancelBooking
       summary: Cancel a booking
       description: >
-        Owner-only. Only allowed while status is `queue`/`waiting` — 409
-        `cannot_cancel` otherwise, including re-canceling.
+        Owner, or staff/worker/admin at the booking's own washing point
+        (broadened from owner-only in docs/PLAN_WEB_APPS.md phase 7, for
+        the worker app's "Снять" no-show action — 404 queue_not_found for
+        another point's staff, not 403). Only allowed while status is
+        `queue`/`waiting` — 409 `cannot_cancel` otherwise, including
+        re-canceling.
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -918,12 +1042,13 @@ paths:
       operationId: updateBookingStatus
       summary: Advance a booking's status
       description: >
-        Requires role `staff` or `admin`, scoped to the booking's own
-        washing point for staff (404 `queue_not_found` otherwise, same as
-        a nonexistent id). Forward-only, one step at a time (`queue` →
-        `waiting` → `washing` → `ready`); `ready` and `canceled` are
-        terminal. 409 `invalid_status_transition` on a skip, a backward
-        move, or any move from a terminal state.
+        Requires role `staff`, `worker`, or `admin` (worker added
+        docs/PLAN_WEB_APPS.md phase 7), scoped to the booking's own washing
+        point (404 `queue_not_found` otherwise, same as a nonexistent id).
+        Forward-only, one step at a time (`queue` → `waiting` → `washing`
+        → `ready`); `ready` and `canceled` are terminal. 409
+        `invalid_status_transition` on a skip, a backward move, or any
+        move from a terminal state.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -939,6 +1064,57 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}/pause:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: pauseBooking
+      summary: Pause a washing in progress
+      description: >
+        Requires role `staff`, `worker`, or `admin`, scoped to the
+        booking's own washing point. Toggles paused_at to now without
+        moving status. Only while status=washing — 409 cannot_pause if not
+        washing or already paused.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}/resume:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: resumeBooking
+      summary: Resume a paused washing
+      description: >
+        Requires role `staff`, `worker`, or `admin`, scoped to the
+        booking's own washing point. Clears paused_at. Only while
+        status=washing and currently paused — 409 cannot_resume otherwise.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
@@ -1496,6 +1672,7 @@ components:
         scheduled_end_at: { type: string, format: date-time }
         notes: { type: string, nullable: true }
         canceled_at: { type: string, format: date-time, nullable: true }
+        paused_at: { type: string, format: date-time, nullable: true, description: "Only meaningful while status=washing." }
         created_at: { type: string, format: date-time }
         cars_ahead:
           type: integer
@@ -1521,6 +1698,7 @@ components:
         box_number: { type: integer, minimum: 1 }
         scheduled_start_at: { type: string, format: date-time }
         scheduled_end_at: { type: string, format: date-time }
+        paused_at: { type: string, format: date-time, nullable: true }
         customer_phone_last4: { type: string, example: "0003", description: "Last 4 digits only, never the full phone number." }
         car_name: { type: string, example: "Demo Car" }
       required: [id, status, box_number, scheduled_start_at, scheduled_end_at, customer_phone_last4]
@@ -1529,6 +1707,39 @@ components:
       type: object
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/BoardItem" } }
+      required: [items]
+
+    LiveBoxBooking:
+      type: object
+      description: >
+        A booking enriched for the worker app's box-cards view — same
+        display-oriented reasoning as BoardItem (no user_id/car_id, no
+        full phone number), plus service_name and paused_at.
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queue, waiting, washing] }
+        service_name: { type: string }
+        scheduled_start_at: { type: string, format: date-time }
+        scheduled_end_at: { type: string, format: date-time }
+        paused_at: { type: string, format: date-time, nullable: true }
+        customer_phone_last4: { type: string, example: "0003" }
+        car_name: { type: string, example: "Demo Car" }
+      required: [id, status, scheduled_start_at, scheduled_end_at, customer_phone_last4]
+
+    LiveBox:
+      type: object
+      properties:
+        number: { type: integer, minimum: 1 }
+        label: { type: string, nullable: true }
+        is_open: { type: boolean }
+        current: { $ref: "#/components/schemas/LiveBoxBooking" }
+        next: { $ref: "#/components/schemas/LiveBoxBooking" }
+      required: [number, is_open]
+
+    LiveBoxList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/LiveBox" } }
       required: [items]
 
     PaginatedBookings:
@@ -1757,3 +1968,29 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/ScheduleRow" }, minItems: 7, maxItems: 7 }
       required: [items]
+
+    Box:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: integer, minimum: 1 }
+        label: { type: string, nullable: true, example: "Detailing lift" }
+        is_open: { type: boolean }
+      required: [id, number, is_open]
+
+    BoxList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Box" } }
+      required: [items]
+
+    BoxCreate:
+      type: object
+      properties:
+        label: { type: string, nullable: true }
+
+    BoxUpdate:
+      type: object
+      properties:
+        label: { type: string, nullable: true }
+        is_open: { type: boolean }

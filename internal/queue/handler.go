@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/platform/eventbus"
@@ -51,6 +52,7 @@ type Handler struct {
 	userRepo     *user.Repository
 	carRepo      *car.Repository
 	scheduleRepo *schedule.Repository
+	boxRepo      *box.Repository
 	bus          *eventbus.Bus
 }
 
@@ -62,24 +64,33 @@ func NewHandler(
 	userRepo *user.Repository,
 	carRepo *car.Repository,
 	scheduleRepo *schedule.Repository,
+	boxRepo *box.Repository,
 	bus *eventbus.Bus,
 ) *Handler {
-	return &Handler{repo: repo, manager: manager, wpRepo: wpRepo, serviceRepo: serviceRepo, userRepo: userRepo, carRepo: carRepo, scheduleRepo: scheduleRepo, bus: bus}
+	return &Handler{repo: repo, manager: manager, wpRepo: wpRepo, serviceRepo: serviceRepo, userRepo: userRepo, carRepo: carRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
 }
 
 // RegisterRoutes mounts availability (public), booking create/get/cancel
-// (any authenticated user, ownership enforced internally) and the staff
-// board + status transition (requireStaff). Everything for a given path
-// prefix is registered in one Route() call with per-method middleware via
-// chi's With(...) — see the note in washingpoint.Handler.RegisterRoutes for
-// why (chi panics if the same prefix is Mount()ed from two separate calls).
-func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) http.Handler, requireStaff ...func(http.Handler) http.Handler) {
+// (any authenticated user, ownership enforced internally), the staff-only
+// network-wide board + notification-adjacent surface (requireStaff:
+// staff/admin), and the per-point live board/status/pause/resume/live-boxes
+// surface (requireQueueOps: staff/worker/admin, docs/PLAN_WEB_APPS.md
+// phase 7 — worker needs these but not the staff-only ones). Everything
+// for a given path prefix is registered in one Route() call with
+// per-method middleware via chi's With(...) — see the note in
+// washingpoint.Handler.RegisterRoutes for why (chi panics if the same
+// prefix is Mount()ed from two separate calls).
+func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) http.Handler, requireStaff, requireQueueOps []func(http.Handler) http.Handler) {
 	r.Route("/washing-points/{id}/availability", func(av chi.Router) {
 		av.Get("/", h.availability)
 	})
 
 	r.Route("/washing-points/{id}/queue", func(board chi.Router) {
-		board.With(requireStaff...).Get("/", h.listByWashingPoint)
+		board.With(requireQueueOps...).Get("/", h.listByWashingPoint)
+	})
+
+	r.Route("/washing-points/{id}/boxes/live", func(live chi.Router) {
+		live.With(requireQueueOps...).Get("/", h.boxesLive)
 	})
 
 	r.Route("/queue", func(q chi.Router) {
@@ -88,7 +99,9 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 		q.With(requireAuth).Get("/{id}", h.get)
 		q.With(requireAuth).Get("/{id}/events", h.events)
 		q.With(requireAuth).Patch("/{id}/cancel", h.cancel)
-		q.With(requireStaff...).Patch("/{id}/status", h.updateStatus)
+		q.With(requireQueueOps...).Patch("/{id}/status", h.updateStatus)
+		q.With(requireQueueOps...).Patch("/{id}/pause", h.pause)
+		q.With(requireQueueOps...).Patch("/{id}/resume", h.resume)
 	})
 
 	r.Route("/me/queue", func(history chi.Router) {
@@ -163,6 +176,24 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 	busy := make([]BusyBoxInterval, len(busyRows))
 	for i, row := range busyRows {
 		busy[i] = BusyBoxInterval{Box: row.BoxNumber, Start: row.ScheduledStartAt, End: row.ScheduledEndAt}
+	}
+
+	// A closed box (docs/PLAN_WEB_APPS.md phase 6) is layered on top of the
+	// sweep-line algorithm as a synthetic all-day "booking" spanning the
+	// whole operating window, rather than changing ComputeAvailableSlotsForDay
+	// itself — it already treats an occupied box as unavailable for any
+	// candidate window overlapping the occupied interval, which is exactly
+	// what "closed all day" means. Missing box rows (e.g. an older point
+	// never backfilled) fail open — nothing is added for them.
+	boxes, err := h.boxRepo.ListByWashingPoint(r.Context(), washingPointID)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	for _, b := range boxes {
+		if !b.IsOpen {
+			busy = append(busy, BusyBoxInterval{Box: b.Number, Start: daySchedule.Open, End: daySchedule.Close})
+		}
 	}
 
 	duration := time.Duration(svc.DurationMinutes) * time.Minute
@@ -245,6 +276,7 @@ type bookingResponse struct {
 	ScheduledEndAt   time.Time  `json:"scheduled_end_at"`
 	Notes            *string    `json:"notes,omitempty"`
 	CanceledAt       *time.Time `json:"canceled_at,omitempty"`
+	PausedAt         *time.Time `json:"paused_at,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
 	CarsAhead        int        `json:"cars_ahead"`
 }
@@ -263,6 +295,7 @@ func toBookingResponse(q *Queue) bookingResponse {
 		ScheduledEndAt:   q.ScheduledEndAt,
 		Notes:            q.Notes,
 		CanceledAt:       q.CanceledAt,
+		PausedAt:         q.PausedAt,
 		CreatedAt:        q.CreatedAt,
 	}
 }
@@ -395,6 +428,10 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
+// cancel is reachable by the booking's own owner (customer) or by
+// staff/worker/admin at its washing point (broadened per
+// docs/PLAN_WEB_APPS.md phase 7 — the worker app's "Снять" no-show
+// action) — same ownership-hiding 404 pattern as get/updateStatus above.
 func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 	authUser, ok := reqctx.AuthUserFromContext(r.Context())
 	if !ok {
@@ -408,7 +445,17 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q, err := h.manager.CancelBooking(r.Context(), id, authUser.ID)
+	existing, err := h.repo.FindByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if existing.UserID != authUser.ID && !authUser.OwnsWashingPoint(existing.WashingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("queue_not_found", "queue entry not found"))
+		return
+	}
+
+	q, err := h.manager.CancelBooking(r.Context(), id)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -419,6 +466,47 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// pause and resume are staff/worker/admin-only (requireQueueOps), scoped
+// to the booking's own washing point — same ownership check as
+// updateStatus.
+func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
+	h.togglePause(w, r, h.manager.Pause)
+}
+
+func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
+	h.togglePause(w, r, h.manager.Resume)
+}
+
+func (h *Handler) togglePause(w http.ResponseWriter, r *http.Request, action func(context.Context, uuid.UUID) (*Queue, error)) {
+	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	if !ok {
+		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
+		return
+	}
+
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	existing, err := h.repo.FindByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(existing.WashingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("queue_not_found", "queue entry not found"))
+		return
+	}
+
+	q, err := action(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, toBookingResponse(q))
 }
 
 type updateStatusRequest struct {
@@ -468,13 +556,14 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type boardItemResponse struct {
-	ID                 string    `json:"id"`
-	Status             string    `json:"status"`
-	BoxNumber          int       `json:"box_number"`
-	ScheduledStartAt   time.Time `json:"scheduled_start_at"`
-	ScheduledEndAt     time.Time `json:"scheduled_end_at"`
-	CustomerPhoneLast4 string    `json:"customer_phone_last4"`
-	CarName            string    `json:"car_name,omitempty"`
+	ID                 string     `json:"id"`
+	Status             string     `json:"status"`
+	BoxNumber          int        `json:"box_number"`
+	ScheduledStartAt   time.Time  `json:"scheduled_start_at"`
+	ScheduledEndAt     time.Time  `json:"scheduled_end_at"`
+	PausedAt           *time.Time `json:"paused_at,omitempty"`
+	CustomerPhoneLast4 string     `json:"customer_phone_last4"`
+	CarName            string     `json:"car_name,omitempty"`
 }
 
 // list is the network-wide counterpart to listByWashingPoint: admin may
@@ -520,6 +609,13 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// listByWashingPoint is the worker/cabinet "today's queue" board
+// (docs/PLAN_WEB_APPS.md phase 7) — scoped to bookings scheduled on one
+// calendar day in businessLocation, defaulting to today when ?date= is
+// omitted. Before phase 7 this returned every live booking regardless of
+// date; no shipped app called this endpoint yet (confirmed by searching
+// q-wash-admin/q-wash-cabinet's use of q-wash-shared's API client), so
+// narrowing the default here doesn't regress anything already built.
 func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 	authUser, ok := reqctx.AuthUserFromContext(r.Context())
 	if !ok {
@@ -537,7 +633,17 @@ func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.repo.ListLiveByWashingPoint(r.Context(), washingPointID)
+	day := time.Now()
+	if raw := r.URL.Query().Get("date"); raw != "" {
+		day, err = time.Parse("2006-01-02", raw)
+		if err != nil {
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_date", "date must be in YYYY-MM-DD format"))
+			return
+		}
+	}
+	dayStart, dayEnd := dayBounds(day)
+
+	rows, err := h.repo.ListLiveByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -549,6 +655,14 @@ func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// dayBounds returns [start, end) for day's calendar date in
+// businessLocation — midnight to the next midnight, local time.
+func dayBounds(day time.Time) (time.Time, time.Time) {
+	local := day.In(businessLocation)
+	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, businessLocation)
+	return start, start.AddDate(0, 0, 1)
 }
 
 // toBoardItems enriches raw queue rows with the customer's car name and the
@@ -598,9 +712,172 @@ func (h *Handler) toBoardItems(ctx context.Context, rows []Queue) ([]boardItemRe
 			BoxNumber:          row.BoxNumber,
 			ScheduledStartAt:   row.ScheduledStartAt,
 			ScheduledEndAt:     row.ScheduledEndAt,
+			PausedAt:           row.PausedAt,
 			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
 			CarName:            nameByCar[row.CarID],
 		}
+	}
+	return items, nil
+}
+
+// boxesLive is the worker app's box-cards screen (docs/PLAN_WEB_APPS.md
+// phase 7): each of the point's boxes joined with whatever booking is
+// currently occupying it (status=washing, "current") or, if free, the
+// earliest still-upcoming one assigned to that box number ("next"). Lives
+// on queue.Handler rather than box.Handler because it needs queue's
+// booking-enrichment helpers (batch phone/car/service lookups) and
+// queue already imports box (for the closed-box check, phase 6) — the
+// reverse import would cycle. Registered as a literal path under the same
+// router as box.Handler's own /boxes routes; chi resolves the static
+// "live" segment ahead of box.Handler's "/{boxId}" wildcard, so the two
+// don't conflict despite sharing a URL prefix.
+func (h *Handler) boxesLive(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	if !ok {
+		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
+		return
+	}
+	washingPointID, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(washingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	boxes, err := h.boxRepo.ListByWashingPoint(r.Context(), washingPointID)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	// Deliberately the unfiltered ListLiveByWashingPoint, not
+	// ListLiveByWashingPointAndDate: a box currently washing a booking that
+	// started yesterday evening, or a box whose next booking is tomorrow
+	// morning with nothing queued today, both still need to show correctly
+	// here — this endpoint answers "what's happening right now", not
+	// "what's on today's calendar" (that's listByWashingPoint's job).
+	rows, err := h.repo.ListLiveByWashingPoint(r.Context(), washingPointID)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	items, err := h.toLiveBoxItems(r.Context(), boxes, rows)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type liveBoxBookingResponse struct {
+	ID                 string     `json:"id"`
+	Status             string     `json:"status"`
+	ServiceName        string     `json:"service_name,omitempty"`
+	ScheduledStartAt   time.Time  `json:"scheduled_start_at"`
+	ScheduledEndAt     time.Time  `json:"scheduled_end_at"`
+	PausedAt           *time.Time `json:"paused_at,omitempty"`
+	CustomerPhoneLast4 string     `json:"customer_phone_last4"`
+	CarName            string     `json:"car_name,omitempty"`
+}
+
+type liveBoxResponse struct {
+	Number  int                     `json:"number"`
+	Label   *string                 `json:"label,omitempty"`
+	IsOpen  bool                    `json:"is_open"`
+	Current *liveBoxBookingResponse `json:"current,omitempty"`
+	Next    *liveBoxBookingResponse `json:"next,omitempty"`
+}
+
+// toLiveBoxItems joins boxes with rows (already ordered by
+// scheduled_start_at, queue/waiting/washing only — see ListLiveByWashingPoint)
+// into one item per box: the washing row occupying its number becomes
+// "current"; otherwise the first queue/waiting row for that number
+// (rows' existing order makes "first seen" the earliest) becomes "next".
+func (h *Handler) toLiveBoxItems(ctx context.Context, boxes []box.Box, rows []Queue) ([]liveBoxResponse, error) {
+	userIDs := make([]uuid.UUID, 0, len(rows))
+	carIDs := make([]uuid.UUID, 0, len(rows))
+	serviceIDs := make([]uuid.UUID, 0, len(rows))
+	seenUser := make(map[uuid.UUID]bool, len(rows))
+	seenCar := make(map[uuid.UUID]bool, len(rows))
+	seenService := make(map[uuid.UUID]bool, len(rows))
+	for _, row := range rows {
+		if !seenUser[row.UserID] {
+			seenUser[row.UserID] = true
+			userIDs = append(userIDs, row.UserID)
+		}
+		if !seenCar[row.CarID] {
+			seenCar[row.CarID] = true
+			carIDs = append(carIDs, row.CarID)
+		}
+		if !seenService[row.ServiceID] {
+			seenService[row.ServiceID] = true
+			serviceIDs = append(serviceIDs, row.ServiceID)
+		}
+	}
+
+	users, err := h.userRepo.FindByIDs(ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	cars, err := h.carRepo.FindByIDs(ctx, carIDs)
+	if err != nil {
+		return nil, err
+	}
+	services, err := h.serviceRepo.FindByIDs(ctx, serviceIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	phoneByUser := make(map[uuid.UUID]string, len(users))
+	for _, u := range users {
+		phoneByUser[u.ID] = u.PhoneNumber
+	}
+	nameByCar := make(map[uuid.UUID]string, len(cars))
+	for _, c := range cars {
+		nameByCar[c.ID] = c.Name
+	}
+	nameByService := make(map[uuid.UUID]string, len(services))
+	for _, s := range services {
+		nameByService[s.ID] = s.Name
+	}
+
+	enrich := func(row Queue) *liveBoxBookingResponse {
+		return &liveBoxBookingResponse{
+			ID:                 row.ID.String(),
+			Status:             string(row.Status),
+			ServiceName:        nameByService[row.ServiceID],
+			ScheduledStartAt:   row.ScheduledStartAt,
+			ScheduledEndAt:     row.ScheduledEndAt,
+			PausedAt:           row.PausedAt,
+			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
+			CarName:            nameByCar[row.CarID],
+		}
+	}
+
+	currentByBox := make(map[int]Queue, len(boxes))
+	nextByBox := make(map[int]Queue, len(boxes))
+	for _, row := range rows {
+		if row.Status == StatusWashing {
+			currentByBox[row.BoxNumber] = row
+			continue
+		}
+		if _, ok := nextByBox[row.BoxNumber]; !ok {
+			nextByBox[row.BoxNumber] = row
+		}
+	}
+
+	items := make([]liveBoxResponse, len(boxes))
+	for i, b := range boxes {
+		item := liveBoxResponse{Number: b.Number, Label: b.Label, IsOpen: b.IsOpen}
+		if cur, ok := currentByBox[b.Number]; ok {
+			item.Current = enrich(cur)
+		} else if next, ok := nextByBox[b.Number]; ok {
+			item.Next = enrich(next)
+		}
+		items[i] = item
 	}
 	return items, nil
 }

@@ -97,25 +97,29 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (*Queue, error)
 	return &q, nil
 }
 
-// FindOwnedByID returns the booking only if it belongs to userID, so a
-// lookup for someone else's booking and a lookup for a nonexistent id both
-// 404 identically.
-func (r *Repository) FindOwnedByID(ctx context.Context, id, userID uuid.UUID) (*Queue, error) {
-	var q Queue
-	err := r.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&q).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, apperror.NotFound("queue_not_found", "queue entry not found")
-	}
-	if err != nil {
-		return nil, apperror.Internal(err)
-	}
-	return &q, nil
-}
-
 // ListLiveByWashingPoint returns bookings still active in the physical
 // queue (not yet ready, not canceled) for the staff-facing board.
 func (r *Repository) ListLiveByWashingPoint(ctx context.Context, washingPointID uuid.UUID) ([]Queue, error) {
 	return r.ListLive(ctx, &washingPointID)
+}
+
+// ListLiveByWashingPointAndDate is ListLiveByWashingPoint further scoped
+// to bookings scheduled to start within [dayStart, dayEnd) — the worker
+// app's "today's queue" (docs/PLAN_WEB_APPS.md phase 7). A separate method
+// rather than an optional param on ListLive/ListLiveByWashingPoint: the
+// network-wide board (queue.Handler.list) has no date filter in the plan
+// and shouldn't gain one as a side effect of this change.
+func (r *Repository) ListLiveByWashingPointAndDate(ctx context.Context, washingPointID uuid.UUID, dayStart, dayEnd time.Time) ([]Queue, error) {
+	var rows []Queue
+	err := r.db.WithContext(ctx).
+		Where("washing_point_id = ? AND status IN ? AND scheduled_start_at >= ? AND scheduled_start_at < ?",
+			washingPointID, []Status{StatusQueue, StatusWaiting, StatusWashing}, dayStart, dayEnd).
+		Order("scheduled_start_at").
+		Find(&rows).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return rows, nil
 }
 
 // ListLive returns bookings still active in the physical queue
@@ -201,6 +205,18 @@ func (r *Repository) UpdateStatus(ctx context.Context, q *Queue) error {
 		updates["canceled_at"] = q.CanceledAt
 	}
 	err := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ?", q.ID).Updates(updates).Error
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+
+// UpdatePausedAt writes paused_at only — a map-based update so setting it
+// back to nil (resume) is a real SQL NULL, not silently skipped the way a
+// struct-based Updates would treat a nil/zero field.
+func (r *Repository) UpdatePausedAt(ctx context.Context, q *Queue) error {
+	err := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ?", q.ID).
+		Updates(map[string]any{"paused_at": q.PausedAt}).Error
 	if err != nil {
 		return apperror.Internal(err)
 	}

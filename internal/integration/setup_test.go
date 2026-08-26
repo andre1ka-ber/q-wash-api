@@ -383,3 +383,10 @@ func futureBookingTime(daysAhead int) string {
 	day := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, daysAhead)
 	return time.Date(day.Year(), day.Month(), day.Day(), 10, 0, 0, 0, time.UTC).Format(time.RFC3339)
 }
+
+// futureBookingDate is futureBookingTime's date-only counterpart, for
+// GET .../availability?date= calls that need to line up with a
+// futureBookingTime(daysAhead) booking on the same calendar day.
+func futureBookingDate(daysAhead int) string {
+	return time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, daysAhead).Format("2006-01-02")
+}

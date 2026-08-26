@@ -58,6 +58,22 @@ func (r *Repository) CountActiveByWashingPointIDs(ctx context.Context, washingPo
 	return counts, nil
 }
 
+// FindByIDs batch-fetches services (name only needed, but returns full
+// rows for consistency with car.Repository.FindByIDs/user.Repository.
+// FindByIDs) for display purposes (e.g. the worker app's live-boxes view).
+// Missing ids are simply absent from the result, not an error. No
+// PriceOptions preload — callers needing those already have FindByID.
+func (r *Repository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]Service, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var services []Service
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&services).Error; err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return services, nil
+}
+
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (*Service, error) {
 	var svc Service
 	err := r.db.WithContext(ctx).

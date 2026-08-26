@@ -46,7 +46,7 @@ Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, ve
 | POST | `/washing-points` | admin | body: `{name, address, latitude, longitude, boxes_count?, open_time?, close_time?, owner_id?, status?, description?, amenities?}`. Defaults: `boxes_count=2`, `open_time="08:00"`, `close_time="20:00"`, `status="active"` (accepts any valid status if given, e.g. to create directly into `pending_review`). Admin-only (403 for staff) — creating a point directly bypasses the connection-request onboarding flow, so it's reserved for admin; staff go through `POST /connection-requests` + approval instead. |
 | PATCH | `/washing-points/{id}` | staff, admin | any subset of the create fields (`owner_id`/`description`/`amenities` included) plus `status` (`active`/`paused`/`pending_review`, 400 `invalid_status` otherwise); re-validates the resulting record (e.g. `close_time > open_time`). `owner_id: ""` clears it. Staff may only act on their own point (`User.washing_point_id`) — 404 `washing_point_not_found` for any other point, same as a nonexistent id. Admin has no such restriction. |
 | DELETE | `/washing-points/{id}` | staff, admin | sets `status=paused` (no row deletion); 204. Same own-point-only restriction on staff as PATCH. |
-| GET | `/washing-points/{id}/availability` | public | query: `service_id` (uuid), `date` (`YYYY-MM-DD`, interpreted as a calendar day in the business timezone, see below). Returns `{items: [{start, end, available_boxes}, ...]}`, RFC3339 timestamps (absolute instants — clients should convert to local time for display, not string-match), stepped every 15 minutes across that date's resolved schedule window(s) (see "Per-weekday schedule" below) — two disjoint windows on a day with a break, none on a closed day. A slot appears only if the service's `duration_minutes` fits before the window's close and at least one box is free for the whole `[start, end)`; `available_boxes` lists which specific box numbers those are, so the client can offer a box choice rather than the server picking one. 400 `invalid_service_id`/`invalid_date`; 400 `service_not_at_washing_point` if the service belongs to a different washing point; 404 if the washing point or service doesn't exist. Algorithm: `internal/queue/availability.go` (`ComputeAvailableSlotsWithBoxes`/`ComputeAvailableSlotsForDay`, unit tested in `availability_test.go`). |
+| GET | `/washing-points/{id}/availability` | public | query: `service_id` (uuid), `date` (`YYYY-MM-DD`, interpreted as a calendar day in the business timezone, see below). Returns `{items: [{start, end, available_boxes}, ...]}`, RFC3339 timestamps (absolute instants — clients should convert to local time for display, not string-match), stepped every 15 minutes across that date's resolved schedule window(s) (see "Per-weekday schedule" below) — two disjoint windows on a day with a break, none on a closed day. A slot appears only if the service's `duration_minutes` fits before the window's close and at least one box is free (and open — see "Boxes" below) for the whole `[start, end)`; `available_boxes` lists which specific box numbers those are, so the client can offer a box choice rather than the server picking one. A box closed via `PATCH .../boxes/{boxId}` never appears in `available_boxes`, treated as booked for the whole day rather than changing the sweep-line algorithm itself. 400 `invalid_service_id`/`invalid_date`; 400 `service_not_at_washing_point` if the service belongs to a different washing point; 404 if the washing point or service doesn't exist. Algorithm: `internal/queue/availability.go` (`ComputeAvailableSlotsWithBoxes`/`ComputeAvailableSlotsForDay`, unit tested in `availability_test.go`). |
 
 Scheduling has no per-point timezone field yet (single washing point, single market) — schedule rows' `open_time`/`close_time`/`break_start`/`break_end` are `HH:MM` strings interpreted in a fixed `Asia/Dushanbe` (UTC+5, no DST) constant (`businessLocation` in `internal/queue/handler.go`), matching the app's current market (Tajikistan). All `queue`/`availability` timestamps on the wire are still real RFC3339 instants (Postgres `timestamptz`), just anchored to that timezone rather than UTC when derived from a schedule row. Revisit (per-point timezone field) when scaling to multiple points/regions.
 
@@ -88,6 +88,42 @@ inverted, or outside `open_time`–`close_time`).
 Validation errors: `invalid_name`, `invalid_address`, `invalid_latitude` (±90), `invalid_longitude` (±180), `invalid_boxes_count` (≥1), `invalid_open_time`/`invalid_close_time` (`HH:MM` 24h), `invalid_hours` (`close_time` must be after `open_time`), `invalid_owner_id` (uuid parse), `invalid_status` — all 400.
 
 Response (`GET`/`POST`/`PATCH /washing-points...`): `owner_id`, `description` and `amenities` are omitted from the JSON body when unset (`null`/empty), rather than sent as `null`/`[]`.
+
+### Boxes — implemented (`docs/PLAN_WEB_APPS.md` phase 6)
+
+Backs the cabinet app's "Боксы" tab. `WashingPoint.boxes_count` stays the
+capacity number `GET .../availability`/`POST /queue` validate `box_number`
+against; a `Box` row is metadata (a display `label`) plus an `is_open` flag
+layered on top of one of those numbered slots — closing one drops it out of
+`available_boxes` (see above) without lowering `boxes_count` itself. Every
+washing point created via `POST /washing-points` or connection-request
+approval is automatically seeded with `boxes_count` open boxes, numbered
+`1..boxes_count`, same "never left with nothing to list" reasoning as the
+schedule auto-seed above.
+
+| method | path | role | notes |
+|---|---|---|---|
+| GET | `/washing-points/{id}/boxes` | public | `{items: [...]}`, ordered by `number` |
+| POST | `/washing-points/{id}/boxes` | staff, admin | body: `{label?}`. `number` is always server-assigned (one past the current highest for that point, `1` if none) — never client-chosen, so there's no way to open a gap or collide. Starts `is_open: true`. |
+| PATCH | `/washing-points/{id}/boxes/{boxId}` | staff, admin | body: `{label?, is_open?}`. `number` can't be changed after creation. |
+| DELETE | `/washing-points/{id}/boxes/{boxId}` | staff, admin | 204, hard delete. Does **not** change `boxes_count` — that's a separate field on the washing point itself (`PATCH /washing-points/{id}`), so deleting a box doesn't silently shrink capacity or vice versa. |
+
+Staff may only act on their own washing point — 404
+`washing_point_not_found`/`box_not_found` for another point's boxes or a
+nonexistent id, same ownership-hiding pattern as photos/schedule; a box id
+addressed through a different point's URL prefix than the one it actually
+belongs to also 404s. Validation errors: 400 `invalid_label` (>255 chars).
+
+Box response:
+```json
+{"id": "...", "number": 1, "label": "Detailing lift", "is_open": true}
+```
+`label` is omitted from the JSON body when unset, rather than sent as `null`.
+
+`POST /queue`'s `box_number` is additionally checked against the matching
+`Box` row (if one exists) as of this phase: 409 `box_closed` if it's closed.
+A `box_number` with no matching row at all (e.g. an older point never
+backfilled) fails open — not rejected on that basis.
 
 ## Photos — implemented (`docs/PLAN_WEB_APPS.md` phase 4)
 
@@ -148,20 +184,31 @@ Validation errors mirror washing points' style: `invalid_name`, `invalid_duratio
 | PATCH | `/cars/{id}` | owner | body: `{name}`; ownership enforced — a non-owner (or nonexistent id) both 404 `car_not_found`, never 403, so existence isn't leaked |
 | DELETE | `/cars/{id}` | owner | 409 `car_in_use` if any `queue` row references it; otherwise a real row delete (cars have no `is_active` field) |
 
-## Queue — implemented (Phases 8 & 9)
+## Queue — implemented (Phases 8 & 9; pause/resume, broadened cancel, live-boxes, date filter added `docs/PLAN_WEB_APPS.md` phase 7)
+
+Two role groups gate this section, not one: `requireStaff` (staff, admin
+only — the network-wide board and, implicitly, everything management-side
+elsewhere in this doc) and `requireQueueOps` (staff, **worker**, admin —
+the per-point live surface a shift technician actually needs: the board,
+status, pause/resume, and live-boxes). A `worker` account can do
+everything marked `staff, worker, admin` below and nothing marked plainly
+`staff, admin`.
 
 | method | path | role | notes |
 |---|---|---|---|
-| GET | `/queue` | staff, admin | network-wide counterpart to `GET /washing-points/{id}/queue` — same live-board shape (`queue`/`waiting`/`washing` bookings), but not scoped to a path-level `{id}`. `admin` may pass `?washing_point_id=` to scope it or omit it for every point at once; `staff`/`worker` are always forced to their own `washing_point_id` regardless of the query param. 400 `invalid_washing_point_id` for a malformed uuid. |
+| GET | `/queue` | staff, admin | network-wide counterpart to `GET /washing-points/{id}/queue` — same live-board shape (`queue`/`waiting`/`washing` bookings), but not scoped to a path-level `{id}`, and **not** date-filtered (unlike the per-point endpoint below). `admin` may pass `?washing_point_id=` to scope it or omit it for every point at once; `staff` are always forced to their own `washing_point_id` regardless of the query param — `worker` cannot reach this endpoint at all (not in `requireStaff`). 400 `invalid_washing_point_id` for a malformed uuid. |
 | POST | `/queue` | any authenticated | body: `{car_id, service_id, price_option_id, box_number, scheduled_start_at, notes?}`. `box_number` is client-chosen (see the washing point's `boxes_count` and the availability endpoint's `available_boxes`) — the server validates it, never auto-assigns. `scheduled_start_at` is RFC3339 and must be in the future. `washing_point_id` is *not* in the body — derived from `service_id`. Not role-restricted to "customer": any authenticated user (including staff) can book for themselves, matching how cars are ownership- not role-scoped. A user may have at most one active (`queue`/`waiting`/`washing`) booking at a time — 409 `active_booking_exists` otherwise; cancel or wait for it to complete first. |
 | GET | `/queue/{id}` | owner, staff, admin | detail; anyone else 404s `queue_not_found` (never 403 — doesn't confirm the id exists). For staff, "anyone else" includes another washing point's staff — scoped to the booking's own point, same as every other staff-gated queue endpoint below. |
 | GET | `/queue/{id}/events` | owner | `text/event-stream`. Pushes the booking (same shape as `GET /queue/{id}`) immediately, then again whenever anything changes for its washing point (a booking created/canceled/advanced there), until the booking reaches `ready`/`canceled` or the client disconnects. A `: ping` comment is sent every 25s to keep the connection alive through proxies. Same ownership rule as `GET /queue/{id}` (404, not 403, for a non-owner). |
-| PATCH | `/queue/{id}/cancel` | owner | only while status is `queue`/`waiting`; 409 `cannot_cancel` otherwise, including re-canceling |
-| PATCH | `/queue/{id}/status` | staff, admin | body: `{status}`, one of `waiting`/`washing`/`ready` (never `queue` or `canceled` — 400 `invalid_status` for anything else). Forward-only, one step at a time: 409 `invalid_status_transition` on a skip, a backward move, or any move from `ready`/`canceled`. Staff may only act on a booking at their own washing point — 404 `queue_not_found` otherwise. |
-| GET | `/washing-points/{id}/queue` | staff, admin | live board: bookings with status `queue`/`waiting`/`washing`, ordered by `scheduled_start_at`. A distinct, display-oriented shape (not the full `Booking` object) — see below. Staff may only view their own washing point's board — 404 `washing_point_not_found` for another point. |
+| PATCH | `/queue/{id}/cancel` | owner, **staff, worker, admin** | only while status is `queue`/`waiting`; 409 `cannot_cancel` otherwise, including re-canceling. As of phase 7, not owner-only any more — staff/worker/admin at the booking's own washing point may also cancel it (the worker app's "Снять" no-show action), scoped the same way every other staff-gated queue endpoint is (404 `queue_not_found`, not 403, for a different point's staff). |
+| PATCH | `/queue/{id}/status` | staff, worker, admin | body: `{status}`, one of `waiting`/`washing`/`ready` (never `queue` or `canceled` — 400 `invalid_status` for anything else). Forward-only, one step at a time: 409 `invalid_status_transition` on a skip, a backward move, or any move from `ready`/`canceled`. Scoped to the caller's own washing point — 404 `queue_not_found` otherwise. |
+| PATCH | `/queue/{id}/pause` | staff, worker, admin | toggles `paused_at` to now, without moving `status`. Only while `status = washing` — 409 `cannot_pause` if not washing or already paused. Same own-point scoping as `/status`. |
+| PATCH | `/queue/{id}/resume` | staff, worker, admin | clears `paused_at`. Only while `status = washing` **and** currently paused — 409 `cannot_resume` otherwise. Same own-point scoping as `/status`. |
+| GET | `/washing-points/{id}/queue` | staff, worker, admin | live board: bookings with status `queue`/`waiting`/`washing`, ordered by `scheduled_start_at`, **further scoped to one calendar day** as of phase 7 (`?date=YYYY-MM-DD`, defaulting to today in the business timezone when omitted — this narrowed the default from "every live booking regardless of date" to "today's"; no shipped app called this endpoint before phase 7, so nothing regressed). 400 `invalid_date` for a malformed value. A distinct, display-oriented shape (not the full `Booking` object) — see below. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
+| GET | `/washing-points/{id}/boxes/live` | staff, worker, admin | the worker app's box-cards screen: each of the point's boxes (see "Boxes" above) joined with whichever booking currently occupies it (`current`, `status=washing`) or, if free, the earliest still-upcoming one assigned to that box number (`next`) — unlike the board above, **not** date-filtered, since "what's happening right now" can span midnight. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/me/queue` | any authenticated | paginated (`?page=&page_size=`, see Conventions below), all statuses, most-recently-scheduled first. Only the caller's own bookings — no role can see another user's history through this endpoint. |
 
-Create validation errors (400 unless noted): `invalid_car_id`/`invalid_service_id`/`invalid_price_option_id` (uuid parse), `invalid_box_number` (outside `1..boxes_count`), `invalid_scheduled_start_at` (not RFC3339, or not in the future), `invalid_notes` (>2000 chars), `service_inactive`/`washing_point_inactive`, `invalid_price_option` (doesn't belong to the service), `outside_operating_hours` (as of phase 5, checked against the requested date's resolved per-weekday schedule window — see "Per-weekday schedule" above — not the legacy flat columns; a closed day or a request straddling a break both hit this code), 404 `car_not_found` (not owned or doesn't exist) / `service_not_found` / `washing_point_not_found`, 409 `slot_unavailable` (the requested box isn't free for some instant in the requested interval) / `active_booking_exists` (the caller already has a `queue`/`waiting`/`washing` booking, at this or any other washing point).
+Create validation errors (400 unless noted): `invalid_car_id`/`invalid_service_id`/`invalid_price_option_id` (uuid parse), `invalid_box_number` (outside `1..boxes_count`), `invalid_scheduled_start_at` (not RFC3339, or not in the future), `invalid_notes` (>2000 chars), `service_inactive`/`washing_point_inactive`, `invalid_price_option` (doesn't belong to the service), `outside_operating_hours` (as of phase 5, checked against the requested date's resolved per-weekday schedule window — see "Per-weekday schedule" above — not the legacy flat columns; a closed day or a request straddling a break both hit this code), 404 `car_not_found` (not owned or doesn't exist) / `service_not_found` / `washing_point_not_found`, 409 `slot_unavailable` (the requested box isn't free for some instant in the requested interval) / `box_closed` (the requested box exists and is closed, see "Boxes" above) / `active_booking_exists` (the caller already has a `queue`/`waiting`/`washing` booking, at this or any other washing point).
 
 Booking response:
 ```json
@@ -169,13 +216,15 @@ Booking response:
   "id": "...", "status": "queue", "user_id": "...", "car_id": "...",
   "service_id": "...", "price_option_id": "...", "washing_point_id": "...",
   "box_number": 1, "scheduled_start_at": "...", "scheduled_end_at": "...",
-  "notes": null, "canceled_at": null, "created_at": "...", "cars_ahead": 0
+  "notes": null, "canceled_at": null, "paused_at": null, "created_at": "...", "cars_ahead": 0
 }
 ```
 `cars_ahead` is the count of other bookings at the same washing point with
 status `queue`/`waiting`/`washing` and an earlier `scheduled_start_at` —
 enough for a "N cars ahead of you" UI without exposing whose bookings they
 are. It's `0` once the booking itself reaches `ready`/`canceled`.
+`paused_at` is omitted from the JSON body when unset, rather than sent as
+`null`; only ever set while `status = washing`.
 
 Race safety for `POST /queue`: the create transaction takes a row lock (`SELECT ... FOR UPDATE`) on the washing point for its duration, so two concurrent booking attempts for the same washing point are fully serialized — the second transaction only proceeds (and re-reads busy bookings for the requested box) after the first commits. The DB's `EXCLUDE` constraint on `queue` (see DATA_MODEL.md) is a last-resort backstop translated into the same `slot_unavailable` 409 if it ever fires despite the lock. The one-active-booking-per-user rule has its own DB-level backstop the same way: a partial `UNIQUE` index (`queue_one_active_booking_per_user`, see DATA_MODEL.md) catches the race the row lock doesn't cover — two of the *same* user's requests landing concurrently for *different* washing points — translated into the same `active_booking_exists` 409.
 
@@ -183,11 +232,29 @@ Queue board response (`GET /washing-points/{id}/queue`) — a separate, display-
 ```json
 {
   "id": "...", "status": "washing", "box_number": 1,
-  "scheduled_start_at": "...", "scheduled_end_at": "...",
+  "scheduled_start_at": "...", "scheduled_end_at": "...", "paused_at": null,
   "customer_phone_last4": "0003", "car_name": "Demo Car"
 }
 ```
-`customer_phone_last4` and `car_name` are batch-fetched (not per-row queries) from the booking's `user_id`/`car_id`.
+`customer_phone_last4` and `car_name` are batch-fetched (not per-row queries) from the booking's `user_id`/`car_id`. `paused_at` is omitted when unset, same as the booking response above.
+
+Live-boxes response (`GET /washing-points/{id}/boxes/live`):
+```json
+{
+  "items": [
+    {"number": 1, "label": null, "is_open": true, "current": {
+      "id": "...", "status": "washing", "service_name": "Full wash",
+      "scheduled_start_at": "...", "scheduled_end_at": "...", "paused_at": null,
+      "customer_phone_last4": "0003", "car_name": "Demo Car"
+    }},
+    {"number": 2, "label": null, "is_open": true}
+  ]
+}
+```
+A box with neither an occupying booking nor an upcoming one (like box 2
+above) has neither `current` nor `next` in its item. `service_name`/
+`customer_phone_last4`/`car_name` are batch-fetched the same way the queue
+board's are.
 
 ## Admin — implemented (`docs/PLAN_WEB_APPS.md` phase 3)
 

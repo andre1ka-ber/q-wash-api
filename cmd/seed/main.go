@@ -1,6 +1,6 @@
 // Command seed populates the local database with baseline dev/demo data:
 // one washing point, a couple of services with price options, an admin,
-// a staff member, three demo customers with cars, and two non-overlapping
+// a staff member, a worker, three demo customers with cars, and two non-overlapping
 // queue bookings (on two different customers — a customer can only have
 // one active booking at a time, so demonstrating "both boxes busy at once"
 // needs two accounts, not one booking each on the same account). It is
@@ -23,6 +23,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/db"
@@ -81,6 +82,26 @@ func run() error {
 	}
 	slog.Info("washing point schedule ready", "washing_point_id", wp.ID)
 
+	// Same reasoning as the schedule seed above: cmd/seed builds the
+	// washing point via raw GORM, bypassing washingpoint.Handler.create's
+	// own box.Manager.SeedDefault call entirely. Unlike the schedule seed,
+	// box.Manager.SeedDefault is not idempotent (no ReplaceAll-style
+	// delete-then-insert — see its own doc comment), so this checks for an
+	// existing row first rather than calling it unconditionally on every
+	// re-run, which would violate the boxes UNIQUE(washing_point_id, number)
+	// constraint on the second run.
+	boxRepo := box.NewRepository(database)
+	existingBoxes, err := boxRepo.ListByWashingPoint(context.Background(), wp.ID)
+	if err != nil {
+		return fmt.Errorf("check existing boxes: %w", err)
+	}
+	if len(existingBoxes) == 0 {
+		if err := box.NewManager(boxRepo).SeedDefault(context.Background(), wp.ID, wp.BoxesCount); err != nil {
+			return fmt.Errorf("seed washing point boxes: %w", err)
+		}
+	}
+	slog.Info("washing point boxes ready", "washing_point_id", wp.ID, "count", wp.BoxesCount)
+
 	fullWash, err := seedService(database, wp.ID, "Full wash", 90, []priceOptionSeed{
 		{Name: "Sedan", PriceCents: 1500, IsDefault: true},
 		{Name: "SUV", PriceCents: 2000},
@@ -106,6 +127,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("seed staff: %w", err)
 	}
+	// A worker account, needed for q-wash-worker (username/password login,
+	// same as staff/admin) to have anything to log in against locally.
+	// Real usage is still blocked on PLAN_WEB_APPS.md phase 7 (the
+	// requireStaff RBAC middleware only allows staff/admin today, so this
+	// account can log in and call GET /me but 403s on every management
+	// route) — seeded now anyway so q-wash-worker's auth flow itself is
+	// testable end to end ahead of that phase landing.
+	worker, err := seedUser(database, "+15550000006", strPtr("Азиз Каримов"), user.RoleWorker)
+	if err != nil {
+		return fmt.Errorf("seed worker: %w", err)
+	}
 	customer, err := seedUser(database, "+15550000003", strPtr("Demo Customer"), user.RoleCustomer)
 	if err != nil {
 		return fmt.Errorf("seed customer: %w", err)
@@ -123,7 +155,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("seed customer 3: %w", err)
 	}
-	slog.Info("users ready", "admin", admin.ID, "staff", staff.ID, "customer", customer.ID, "customer2", customer2.ID, "customer3", customer3.ID)
+	slog.Info("users ready", "admin", admin.ID, "staff", staff.ID, "worker", worker.ID, "customer", customer.ID, "customer2", customer2.ID, "customer3", customer3.ID)
 
 	// Username/password login is staff/admin-only (customers stay
 	// phone+OTP) — used by the queue board and staff panel. Dev-only
@@ -134,7 +166,10 @@ func run() error {
 	if err := setStaffCredentials(database, staff.ID, "staff", "staff12345"); err != nil {
 		return fmt.Errorf("set staff credentials: %w", err)
 	}
-	slog.Info("staff/admin login credentials ready", "admin_username", "admin", "staff_username", "staff")
+	if err := setStaffCredentials(database, worker.ID, "worker", "worker12345"); err != nil {
+		return fmt.Errorf("set worker credentials: %w", err)
+	}
+	slog.Info("staff/admin/worker login credentials ready", "admin_username", "admin", "staff_username", "staff", "worker_username", "worker")
 
 	// Scopes the seeded staff account to the seeded washing point — needed
 	// for q-wash-cabinet (staff-only, no point picker) to have anything to
@@ -144,6 +179,12 @@ func run() error {
 	if err := database.Model(&user.User{}).Where("id = ?", staff.ID).
 		Update("washing_point_id", wp.ID).Error; err != nil {
 		return fmt.Errorf("set staff washing_point_id: %w", err)
+	}
+	// Same for the worker account — q-wash-worker's ProtectedRoute requires
+	// washing_point_id just like q-wash-cabinet's does.
+	if err := database.Model(&user.User{}).Where("id = ?", worker.ID).
+		Update("washing_point_id", wp.ID).Error; err != nil {
+		return fmt.Errorf("set worker washing_point_id: %w", err)
 	}
 
 	demoCar, err := seedCar(database, customer.ID, "Demo Car")

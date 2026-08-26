@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/platform/eventbus"
 	"q-wash-api/internal/schedule"
@@ -27,11 +28,12 @@ type Manager struct {
 	serviceRepo  *service.Repository
 	wpRepo       *washingpoint.Repository
 	scheduleRepo *schedule.Repository
+	boxRepo      *box.Repository
 	bus          *eventbus.Bus
 }
 
-func NewManager(db *gorm.DB, repo *Repository, carRepo *car.Repository, serviceRepo *service.Repository, wpRepo *washingpoint.Repository, scheduleRepo *schedule.Repository, bus *eventbus.Bus) *Manager {
-	return &Manager{db: db, repo: repo, carRepo: carRepo, serviceRepo: serviceRepo, wpRepo: wpRepo, scheduleRepo: scheduleRepo, bus: bus}
+func NewManager(db *gorm.DB, repo *Repository, carRepo *car.Repository, serviceRepo *service.Repository, wpRepo *washingpoint.Repository, scheduleRepo *schedule.Repository, boxRepo *box.Repository, bus *eventbus.Bus) *Manager {
+	return &Manager{db: db, repo: repo, carRepo: carRepo, serviceRepo: serviceRepo, wpRepo: wpRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
 }
 
 type CreateBookingInput struct {
@@ -98,6 +100,13 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 
 	if in.BoxNumber < 1 || in.BoxNumber > wp.BoxesCount {
 		return nil, apperror.BadRequest("invalid_box_number", fmt.Sprintf("box_number must be between 1 and %d", wp.BoxesCount))
+	}
+	requestedBox, err := m.boxRepo.FindByNumber(ctx, wp.ID, in.BoxNumber)
+	if err != nil {
+		return nil, err
+	}
+	if requestedBox != nil && !requestedBox.IsOpen {
+		return nil, apperror.Conflict("box_closed", "the requested box is currently closed")
 	}
 
 	if !in.ScheduledStartAt.After(time.Now()) {
@@ -177,9 +186,13 @@ func verifyBoxAvailable(boxNumber int, start, end time.Time, busy []Queue) error
 	return nil
 }
 
-// CancelBooking is owner-only and only allowed before washing starts.
-func (m *Manager) CancelBooking(ctx context.Context, id, userID uuid.UUID) (*Queue, error) {
-	q, err := m.repo.FindOwnedByID(ctx, id, userID)
+// CancelBooking only allowed before washing starts. Who may call this is
+// decided by the caller (queue.Handler.cancel) before reaching here — the
+// booking's owner, or staff/worker/admin at its washing point (broadened
+// from owner-only per docs/PLAN_WEB_APPS.md phase 7, for the worker app's
+// "Снять" no-show action), same layering as UpdateStatus below.
+func (m *Manager) CancelBooking(ctx context.Context, id uuid.UUID) (*Queue, error) {
+	q, err := m.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +204,49 @@ func (m *Manager) CancelBooking(ctx context.Context, id, userID uuid.UUID) (*Que
 	q.Status = StatusCanceled
 	q.CanceledAt = &now
 	if err := m.repo.UpdateStatus(ctx, q); err != nil {
+		return nil, err
+	}
+	m.bus.Publish(q.WashingPointID)
+	return q, nil
+}
+
+// Pause and Resume toggle PausedAt without moving Status — only valid
+// while Status is StatusWashing (docs/PLAN_WEB_APPS.md phase 7). Ownership
+// (staff/worker/admin at the booking's washing point) is checked by the
+// caller, same layering as CancelBooking/UpdateStatus.
+func (m *Manager) Pause(ctx context.Context, id uuid.UUID) (*Queue, error) {
+	q, err := m.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if q.Status != StatusWashing {
+		return nil, apperror.Conflict("cannot_pause", "booking can only be paused while washing")
+	}
+	if q.PausedAt != nil {
+		return nil, apperror.Conflict("cannot_pause", "booking is already paused")
+	}
+	now := time.Now()
+	q.PausedAt = &now
+	if err := m.repo.UpdatePausedAt(ctx, q); err != nil {
+		return nil, err
+	}
+	m.bus.Publish(q.WashingPointID)
+	return q, nil
+}
+
+func (m *Manager) Resume(ctx context.Context, id uuid.UUID) (*Queue, error) {
+	q, err := m.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if q.Status != StatusWashing {
+		return nil, apperror.Conflict("cannot_resume", "booking can only be resumed while washing")
+	}
+	if q.PausedAt == nil {
+		return nil, apperror.Conflict("cannot_resume", "booking is not paused")
+	}
+	q.PausedAt = nil
+	if err := m.repo.UpdatePausedAt(ctx, q); err != nil {
 		return nil, err
 	}
 	m.bus.Publish(q.WashingPointID)

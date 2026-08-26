@@ -26,6 +26,7 @@ type Manager struct {
 	ownerRepo      *owner.Repository
 	wpRepo         *washingpoint.Repository
 	scheduleSeeder ScheduleSeeder
+	boxSeeder      BoxSeeder
 }
 
 // ScheduleSeeder provisions a newly created washing point's initial
@@ -36,8 +37,16 @@ type ScheduleSeeder interface {
 	SeedDefault(ctx context.Context, washingPointID uuid.UUID, openTime, closeTime string) error
 }
 
-func NewManager(repo *Repository, ownerRepo *owner.Repository, wpRepo *washingpoint.Repository, scheduleSeeder ScheduleSeeder) *Manager {
-	return &Manager{repo: repo, ownerRepo: ownerRepo, wpRepo: wpRepo, scheduleSeeder: scheduleSeeder}
+// BoxSeeder provisions a newly created washing point's initial boxes
+// (docs/PLAN_WEB_APPS.md phase 6). Locally defined for the same
+// import-direction reason as washingpoint.BoxSeeder; satisfied
+// structurally by *box.Manager.
+type BoxSeeder interface {
+	SeedDefault(ctx context.Context, washingPointID uuid.UUID, count int) error
+}
+
+func NewManager(repo *Repository, ownerRepo *owner.Repository, wpRepo *washingpoint.Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder) *Manager {
+	return &Manager{repo: repo, ownerRepo: ownerRepo, wpRepo: wpRepo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder}
 }
 
 func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*ConnectionRequest, *washingpoint.WashingPoint, error) {
@@ -75,6 +84,9 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 		return nil, nil, err
 	}
 	if err := m.scheduleSeeder.SeedDefault(ctx, wp.ID, wp.OpenTime, wp.CloseTime); err != nil {
+		return nil, nil, apperror.Internal(err)
+	}
+	if err := m.boxSeeder.SeedDefault(ctx, wp.ID, wp.BoxesCount); err != nil {
 		return nil, nil, apperror.Internal(err)
 	}
 

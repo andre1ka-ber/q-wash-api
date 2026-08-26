@@ -13,6 +13,7 @@ import (
 
 	"q-wash-api/internal/admin"
 	"q-wash-api/internal/auth"
+	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/connectionrequest"
@@ -58,7 +59,11 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	scheduleManager := schedule.NewManager(scheduleRepo)
 	scheduleHandler := schedule.NewHandler(scheduleRepo, scheduleManager, wpRepo)
 
-	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager)
+	boxRepo := box.NewRepository(database)
+	boxManager := box.NewManager(boxRepo)
+	boxHandler := box.NewHandler(boxRepo, boxManager)
+
+	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager, boxManager)
 
 	serviceRepo := service.NewRepository(database)
 	serviceManager := service.NewManager(serviceRepo)
@@ -69,8 +74,8 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 
 	queueBus := eventbus.New()
 	queueRepo := queue.NewRepository(database)
-	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, queueBus)
-	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, queueBus)
+	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, boxRepo, queueBus)
+	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, boxRepo, queueBus)
 
 	notificationRepo := notification.NewRepository(database)
 	notificationManager := notification.NewManager(notificationRepo, userRepo, queueRepo, smsSender)
@@ -80,7 +85,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	ownerHandler := owner.NewHandler(ownerRepo)
 
 	connectionRequestRepo := connectionrequest.NewRepository(database)
-	connectionRequestManager := connectionrequest.NewManager(connectionRequestRepo, ownerRepo, wpRepo, scheduleManager)
+	connectionRequestManager := connectionrequest.NewManager(connectionRequestRepo, ownerRepo, wpRepo, scheduleManager, boxManager)
 	connectionRequestHandler := connectionrequest.NewHandler(connectionRequestRepo, connectionRequestManager)
 
 	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo)
@@ -94,6 +99,15 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 		requireAuth,
 		auth.RequireRole(string(user.RoleStaff), string(user.RoleAdmin)),
 	}
+	// requireQueueOps additionally admits worker (docs/PLAN_WEB_APPS.md
+	// phase 7) — narrower than requireStaff on purpose: a shift technician
+	// gets the live queue/box surface (board, status, pause/resume,
+	// live-boxes) but not washingpoint/service/photo/schedule/box
+	// management, which stays requireStaff (staff/admin only).
+	requireQueueOps := []func(http.Handler) http.Handler{
+		requireAuth,
+		auth.RequireRole(string(user.RoleStaff), string(user.RoleWorker), string(user.RoleAdmin)),
+	}
 	// requireAdmin gates the network-wide admin app's own surface (owners,
 	// connection requests) — staff are scoped to one point (see
 	// user.User.WashingPointID) and have no business managing another
@@ -106,13 +120,14 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	authHandler.RegisterPublicRoutes(v1)
 	wpHandler.RegisterRoutes(v1, requireStaff...)
 	serviceHandler.RegisterRoutes(v1, requireStaff...)
-	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff...)
+	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps)
 	notificationHandler.RegisterRoutes(v1, requireAuth, requireStaff...)
 	ownerHandler.RegisterRoutes(v1, requireAdmin...)
 	connectionRequestHandler.RegisterRoutes(v1, requireAdmin...)
 	adminHandler.RegisterRoutes(v1, requireAdmin...)
 	photoHandler.RegisterRoutes(v1, requireStaff...)
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)
+	boxHandler.RegisterRoutes(v1, requireStaff...)
 
 	v1.Group(func(protected chi.Router) {
 		protected.Use(requireAuth)

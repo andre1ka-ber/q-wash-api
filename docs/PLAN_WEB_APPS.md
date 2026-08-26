@@ -294,10 +294,46 @@ router group.
       for the reasoning) but are legacy/informational only as of this
       phase; every new point is auto-seeded with a default schedule from
       them on creation so nothing is ever left unbookable.
-- [ ] **6 — Boxes**: CRUD + availability filter for `is_open = false`.
-- [ ] **7 — Worker role**: `User.washing_point_id` + `worker` role in RBAC
-      middleware, live-boxes endpoint, pause/resume, broadened cancel RBAC,
-      today's-queue date filter.
+- [x] **6 — Boxes**: `Box` CRUD (`internal/box`, same repo/manager/handler
+      shape as `photo`) + availability filter for `is_open = false`. The
+      filter is layered onto the existing sweep-line algorithm rather than
+      changing it: a closed box is added to `GET .../availability`'s `busy`
+      list as a synthetic all-day interval, same "layered on top" framing
+      the migration's own comment used — `ComputeAvailableSlotsWithBoxes`/
+      `ComputeAvailableSlotsForDay` are untouched, so their existing unit
+      tests needed no changes. `POST /queue` gained the matching check
+      directly (409 `box_closed`) since a client picks `box_number`
+      explicitly there, bypassing the availability endpoint's own
+      suggestions. New points (`POST /washing-points`, connection-request
+      approval) auto-seed `boxes_count` open boxes via a `BoxSeeder`
+      interface mirroring `ScheduleSeeder` exactly (same
+      can't-import-`internal/box`-from-`washingpoint`-or-
+      `connectionrequest` constraint). `boxes_count` and `Box` rows stay
+      independently updatable — deleting a box doesn't shrink `boxes_count`
+      and vice versa; not attempted as a synced pair, flagged as a known,
+      accepted gap rather than solved, since neither direction is required
+      by anything in this doc. See `PROGRESS.md` for the full write-up.
+- [x] **7 — Worker role**: `User.washing_point_id` + `worker` role were
+      already in place since phase 1 (login already accepted `worker`) —
+      what this phase actually added was a new, deliberately narrower RBAC
+      group. Not a blanket widening of `requireStaff`: a new
+      `requireQueueOps` (staff/worker/admin) middleware set gates only the
+      per-point live surface a shift technician needs (queue board, status,
+      pause/resume, live-boxes), while `requireStaff` (staff/admin only,
+      unchanged) still gates washingpoint/service/photo/schedule/box
+      management and the network-wide `GET /queue` — a worker was never
+      meant to edit the services catalog. `PATCH /queue/{id}/pause`/
+      `/resume` toggle the already-existing (since phase 1, unused until
+      now) `Queue.PausedAt` column, 409 outside `status = washing` or on a
+      redundant call. `PATCH /queue/{id}/cancel`'s ownership check moved
+      from `queue.Manager` (owner-only) into `queue.Handler` (owner OR
+      staff/worker/admin at the booking's own point), matching the layering
+      every other staff-gated queue action already used. `GET
+      /washing-points/{id}/queue` gained a `?date=` filter defaulting to
+      today; new `GET /washing-points/{id}/boxes/live` (implemented on
+      `queue.Handler`, not `box.Handler`, to reuse queue's booking-enrichment
+      helpers without an import cycle) joins each box with its current or
+      next booking. See `PROGRESS.md` for the full write-up.
 - [ ] **8 — Display board**: `GET /washing-points/{id}/board` (staff/admin
       RBAC, same login every other app uses — no new auth mechanism, see
       the `q-wash-display` section above), optional SSE variant.

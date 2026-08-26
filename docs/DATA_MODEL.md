@@ -121,17 +121,27 @@ can go live. Rejecting or re-reviewing an already-reviewed request 409s
 ### Box
 An individual washing bay within a point — metadata + open/closed state
 layered on top of `WashingPoint.boxes_count`, which stays the number
-availability math uses. Backfilled with one row per existing point per box
-number. Not yet surfaced by any handler; see `PLAN_WEB_APPS.md`.
+availability math uses. `internal/box` (`GET/POST /washing-points/{id}/boxes`,
+`PATCH`/`DELETE /washing-points/{id}/boxes/{boxId}`) — reads public, writes
+staff/admin scoped to their own point, same ownership pattern as
+`WashingPointPhoto` above. Every point (existing, backfilled by the phase-1
+migration; new, seeded by `box.Manager.SeedDefault` from
+`washingpoint.Handler.create`/`connectionrequest.Manager.Approve`, mirroring
+`schedule.Manager.SeedDefault`) starts with one open row per box number.
 
 | field | type | notes |
 |---|---|---|
 | id | uuid | PK |
 | washing_point_id | uuid | FK -> WashingPoint |
-| number | int | 1..boxes_count, unique per point |
+| number | int | 1..boxes_count, unique per point; server-assigned on create (one past the current max), never client-chosen |
 | label | string, nullable | e.g. "Detailing lift" |
-| is_open | bool | default true — closed boxes are meant to drop out of availability once wired up |
+| is_open | bool | default true; `queue.Manager.CreateBooking` rejects a `box_number` matching a closed row (409 `box_closed`), and `GET .../availability` excludes a closed box from every slot's `available_boxes` for the whole day — implemented as a synthetic all-day busy interval layered onto the existing sweep-line algorithm (`queue.Handler.availability`), not a change to `ComputeAvailableSlotsForDay` itself. A `box_number`/row pairing that doesn't exist (e.g. an older point never backfilled) fails open. |
 | created_at / updated_at | timestamp | |
+
+Deleting a box (`DELETE .../boxes/{boxId}`) does not change
+`WashingPoint.boxes_count` — the two are updated independently, so a delete
+can't silently shrink capacity and a `boxes_count` change doesn't
+auto-create/remove rows.
 
 ### WashingPointSchedule
 Per-weekday operating hours — as of `PLAN_WEB_APPS.md` phase 5, this is the
@@ -247,10 +257,10 @@ The booking / queue entry. Central entity tying everything together.
 | scheduled_end_at | timestamp | `scheduled_start_at + service.duration_minutes`, stored for fast overlap queries |
 | notes | string, nullable | free-text, optional |
 | canceled_at | timestamp, nullable | |
-| paused_at | timestamp, nullable | only meaningful while `status = washing`; meant for the worker app's pause/resume actions, not yet wired to any endpoint — see `PLAN_WEB_APPS.md` phase 7. Deliberately not a new `status` value: the forward-only state machine below stays untouched. |
+| paused_at | timestamp, nullable | only meaningful while `status = washing`. Toggled by `PATCH /queue/{id}/pause`/`/resume` (staff/worker/admin, `docs/PLAN_WEB_APPS.md` phase 7) via `queue.Manager.Pause`/`Resume` — 409 `cannot_pause`/`cannot_resume` outside `status = washing` or on a redundant call. Deliberately not a new `status` value: the forward-only state machine below stays untouched. |
 | created_at / updated_at | timestamp | |
 
-State machine: `queue -> waiting -> washing -> ready`. `canceled` reachable only from `queue` or `waiting` (spec: "cancel queue before changing status to washing"). No transition skips a stage; enforced in `queue.Manager` (app layer, not a DB constraint) — `PATCH /queue/{id}/status` (staff/admin) drives the forward path one step at a time, `PATCH /queue/{id}/cancel` (owner) is the only way to reach `canceled`.
+State machine: `queue -> waiting -> washing -> ready`. `canceled` reachable only from `queue` or `waiting` (spec: "cancel queue before changing status to washing"). No transition skips a stage; enforced in `queue.Manager` (app layer, not a DB constraint) — `PATCH /queue/{id}/status` (staff/worker/admin as of phase 7) drives the forward path one step at a time, `PATCH /queue/{id}/cancel` is the only way to reach `canceled` — the booking's own owner, or staff/worker/admin at its washing point (broadened from owner-only in phase 7, for the worker app's "Снять" no-show action; `queue.Manager.CancelBooking` itself no longer checks ownership — `queue.Handler.cancel` does, before calling it, same layering `updateStatus`/`pause`/`resume` already used).
 
 > Note on original spec: the `queue` model line ended with a trailing "optional" whose referent was ambiguous. Interpreted here as "there may be additional optional fields" (`notes`), not that `service_id` itself is optional — a service is required to resolve duration/price for scheduling. Flag if that's wrong.
 
