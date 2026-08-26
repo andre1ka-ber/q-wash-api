@@ -24,7 +24,9 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
 - [x] `docs/PLAN_WEB_APPS.md` phase 3 — Admin washing-point extensions (owner_id/status/description/amenities, `GET /admin/washing-points`, `GET /admin/stats`, `GET /queue` network-wide filter)
 - [x] `docs/PLAN_WEB_APPS.md` phase 4 — Photos (`internal/platform/storage`, `internal/photo` CRUD)
 - [x] `docs/PLAN_WEB_APPS.md` phase 5 — Per-weekday schedule (`internal/schedule` CRUD + availability/booking-creation rework)
-- [ ] `docs/PLAN_WEB_APPS.md` phases 6–9 (boxes, worker role, public display board, docs+tests)
+- [x] `docs/PLAN_WEB_APPS.md` phase 6 — Boxes (`internal/box` CRUD + availability/queue-create closed-box filter)
+- [x] `docs/PLAN_WEB_APPS.md` phase 7 — Worker role (`requireQueueOps`, pause/resume, broadened cancel, live-boxes, queue date filter)
+- [ ] `docs/PLAN_WEB_APPS.md` phases 8–9 (public display board, docs+tests)
 
 ## Log
 
