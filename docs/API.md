@@ -184,7 +184,7 @@ Validation errors mirror washing points' style: `invalid_name`, `invalid_duratio
 | PATCH | `/cars/{id}` | owner | body: `{name}`; ownership enforced — a non-owner (or nonexistent id) both 404 `car_not_found`, never 403, so existence isn't leaked |
 | DELETE | `/cars/{id}` | owner | 409 `car_in_use` if any `queue` row references it; otherwise a real row delete (cars have no `is_active` field) |
 
-## Queue — implemented (Phases 8 & 9; pause/resume, broadened cancel, live-boxes, date filter added `docs/PLAN_WEB_APPS.md` phase 7)
+## Queue — implemented (Phases 8 & 9; pause/resume, broadened cancel, live-boxes, date filter added `docs/PLAN_WEB_APPS.md` phase 7; lobby-display board added phase 8)
 
 Two role groups gate this section, not one: `requireStaff` (staff, admin
 only — the network-wide board and, implicitly, everything management-side
@@ -206,6 +206,7 @@ everything marked `staff, worker, admin` below and nothing marked plainly
 | PATCH | `/queue/{id}/resume` | staff, worker, admin | clears `paused_at`. Only while `status = washing` **and** currently paused — 409 `cannot_resume` otherwise. Same own-point scoping as `/status`. |
 | GET | `/washing-points/{id}/queue` | staff, worker, admin | live board: bookings with status `queue`/`waiting`/`washing`, ordered by `scheduled_start_at`, **further scoped to one calendar day** as of phase 7 (`?date=YYYY-MM-DD`, defaulting to today in the business timezone when omitted — this narrowed the default from "every live booking regardless of date" to "today's"; no shipped app called this endpoint before phase 7, so nothing regressed). 400 `invalid_date` for a malformed value. A distinct, display-oriented shape (not the full `Booking` object) — see below. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/washing-points/{id}/boxes/live` | staff, worker, admin | the worker app's box-cards screen: each of the point's boxes (see "Boxes" above) joined with whichever booking currently occupies it (`current`, `status=washing`) or, if free, the earliest still-upcoming one assigned to that box number (`next`) — unlike the board above, **not** date-filtered, since "what's happening right now" can span midnight. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
+| GET | `/washing-points/{id}/board` | staff, admin | `docs/PLAN_WEB_APPS.md` phase 8 — the lobby-display kiosk's one summary endpoint. **Not** in `requireQueueOps` — `worker` cannot reach this one, only staff/admin (the kiosk logs in as staff/admin, no new role). Boxes joined with today's currently-washing booking (`current`, `nil` = free) plus a flat, `scheduled_start_at`-ordered waiting list (`queue`/`waiting` bookings) across every box for the rest of today — date-filtered same as the queue board above, unlike `boxes/live`. No ticket-number field exists anywhere in the data model (see "Open assumptions" in `PLAN_WEB_APPS.md`); customer identity is `car_name` + `customer_phone_last4`, same convention as the other board endpoints, decided with the user for this endpoint even though it's the one screen visible to a room of other customers. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/me/queue` | any authenticated | paginated (`?page=&page_size=`, see Conventions below), all statuses, most-recently-scheduled first. Only the caller's own bookings — no role can see another user's history through this endpoint. |
 
 Create validation errors (400 unless noted): `invalid_car_id`/`invalid_service_id`/`invalid_price_option_id` (uuid parse), `invalid_box_number` (outside `1..boxes_count`), `invalid_scheduled_start_at` (not RFC3339, or not in the future), `invalid_notes` (>2000 chars), `service_inactive`/`washing_point_inactive`, `invalid_price_option` (doesn't belong to the service), `outside_operating_hours` (as of phase 5, checked against the requested date's resolved per-weekday schedule window — see "Per-weekday schedule" above — not the legacy flat columns; a closed day or a request straddling a break both hit this code), 404 `car_not_found` (not owned or doesn't exist) / `service_not_found` / `washing_point_not_found`, 409 `slot_unavailable` (the requested box isn't free for some instant in the requested interval) / `box_closed` (the requested box exists and is closed, see "Boxes" above) / `active_booking_exists` (the caller already has a `queue`/`waiting`/`washing` booking, at this or any other washing point).
@@ -255,6 +256,34 @@ A box with neither an occupying booking nor an upcoming one (like box 2
 above) has neither `current` nor `next` in its item. `service_name`/
 `customer_phone_last4`/`car_name` are batch-fetched the same way the queue
 board's are.
+
+Display-board response (`GET /washing-points/{id}/board`):
+```json
+{
+  "boxes_active": 1, "boxes_total": 3,
+  "boxes": [
+    {"number": 1, "is_open": true, "current": {
+      "status": "washing", "service_name": "Full wash",
+      "scheduled_start_at": "...", "scheduled_end_at": "...", "paused_at": null,
+      "customer_phone_last4": "0003", "car_name": "Demo Car"
+    }},
+    {"number": 2, "label": "Детейлинг · подъёмник", "is_open": true},
+    {"number": 3, "label": "Ручная мойка", "is_open": true}
+  ],
+  "waiting": [
+    {"id": "...", "status": "queue", "box_number": 2, "service_name": "Express wash",
+     "scheduled_start_at": "...", "customer_phone_last4": "0004", "car_name": "Demo Car 2"}
+  ]
+}
+```
+`boxes_active`/`boxes_total` back the header's "в работе N из M боксов"
+stat — `boxes_active` counts boxes with a `current` booking (regardless of
+`is_open`, since a box already mid-wash when closed should still count as
+active), `boxes_total` is every box regardless of open/closed state.
+`waiting`'s items have no `next`/`current` box concept of their own — it's
+a flat, cross-box list, unlike `boxes/live`'s per-box `next`. No average
+wait time — nothing in the API computes one (deferred, see
+`PLAN_WEB_APPS.md`'s "Open assumptions").
 
 ## Admin — implemented (`docs/PLAN_WEB_APPS.md` phase 3)
 

@@ -1156,6 +1156,169 @@ func TestQueue_WorkerRBACPauseResumeCancelAndDateFilter(t *testing.T) {
 	})
 }
 
+func TestDisplayBoard_RBACAndTodayScoping(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(110), user.RoleAdmin)
+	staffPhone := uniquePhone(111)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	workerAccess := env.loginAs(t, uniquePhone(112), user.RoleWorker)
+	otherStaffPhone := uniquePhone(113)
+	env.loginAs(t, otherStaffPhone, user.RoleStaff)
+	customerAccess := env.loginAs(t, uniquePhone(114), "")
+	customer2Access := env.loginAs(t, uniquePhone(115), "")
+
+	// Wide-open hours (00:00-23:59) so todayBookingTime's real-wall-clock
+	// timestamps never trip outside_operating_hours regardless of when this
+	// test actually runs.
+	wp := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Display Board Point", "address": "1 Test St", "latitude": 1.0, "longitude": 2.0,
+		"boxes_count": 2, "open_time": "00:00", "close_time": "23:59",
+	})
+	if wp.status != http.StatusCreated {
+		t.Fatalf("create wp: expected 201, got %d (%v)", wp.status, wp.body)
+	}
+	wpID := wp.str("id")
+	env.setWashingPointID(t, staffPhone, wpID)
+	staffAccess := env.reLogin(t, staffPhone)
+
+	otherWP := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Other Display Point", "address": "2 Test St", "latitude": 3.0, "longitude": 4.0,
+	})
+	if otherWP.status != http.StatusCreated {
+		t.Fatalf("create other wp: expected 201, got %d (%v)", otherWP.status, otherWP.body)
+	}
+	env.setWashingPointID(t, otherStaffPhone, otherWP.str("id"))
+	otherStaffAccess := env.reLogin(t, otherStaffPhone)
+
+	svc := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/services", adminAccess, map[string]any{
+		"name": "Quick Wash", "duration_minutes": 30,
+		"price_options": []map[string]any{{"name": "Standard", "price_cents": 500}},
+	})
+	if svc.status != http.StatusCreated {
+		t.Fatalf("create service: expected 201, got %d (%v)", svc.status, svc.body)
+	}
+	priceOptions, _ := svc.body["price_options"].([]any)
+	priceOptionID, _ := priceOptions[0].(map[string]any)["id"].(string)
+	svcID := svc.str("id")
+
+	boardPath := "/api/v1/washing-points/" + wpID + "/board"
+
+	t.Run("unauthenticated cannot reach the board", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, "", nil)
+		if resp.status != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("worker cannot reach the board (requireStaff excludes worker, unlike boxes/live)", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, workerAccess, nil)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("a different point's staff can't see this point's board (IDOR check)", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, otherStaffAccess, nil)
+		if resp.status != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("empty board before any bookings", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		if resp.body["boxes_active"] != float64(0) || resp.body["boxes_total"] != float64(2) {
+			t.Fatalf("expected boxes_active=0 boxes_total=2, got %v", resp.body)
+		}
+		waiting, _ := resp.body["waiting"].([]any)
+		if len(waiting) != 0 {
+			t.Fatalf("expected empty waiting list, got %v", waiting)
+		}
+	})
+
+	customerPhone := uniquePhone(114)
+	customerLast4 := customerPhone[len(customerPhone)-4:]
+	carID := env.createCar(t, customerAccess, "Board Test Car")
+	booking1 := env.do(t, http.MethodPost, "/api/v1/queue", customerAccess, map[string]any{
+		"car_id": carID, "service_id": svcID, "box_number": 1,
+		"price_option_id": priceOptionID, "scheduled_start_at": todayBookingTime(15),
+	})
+	if booking1.status != http.StatusCreated {
+		t.Fatalf("create booking 1: expected 201, got %d (%v)", booking1.status, booking1.body)
+	}
+	booking1ID := booking1.str("id")
+
+	customer2Phone := uniquePhone(115)
+	customer2Last4 := customer2Phone[len(customer2Phone)-4:]
+	car2ID := env.createCar(t, customer2Access, "Board Test Car 2")
+	booking2 := env.do(t, http.MethodPost, "/api/v1/queue", customer2Access, map[string]any{
+		"car_id": car2ID, "service_id": svcID, "box_number": 2,
+		"price_option_id": priceOptionID, "scheduled_start_at": todayBookingTime(20),
+	})
+	if booking2.status != http.StatusCreated {
+		t.Fatalf("create booking 2: expected 201, got %d (%v)", booking2.status, booking2.body)
+	}
+
+	t.Run("both bookings start out in the waiting list, no box active yet", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, staffAccess, nil)
+		if resp.body["boxes_active"] != float64(0) {
+			t.Fatalf("expected boxes_active=0, got %v", resp.body)
+		}
+		waiting, _ := resp.body["waiting"].([]any)
+		if len(waiting) != 2 {
+			t.Fatalf("expected 2 waiting items, got %v", waiting)
+		}
+	})
+
+	if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+booking1ID+"/status", staffAccess, map[string]any{"status": "waiting"}); r.status != http.StatusOK {
+		t.Fatalf("advance to waiting: expected 200, got %d (%v)", r.status, r.body)
+	}
+	if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+booking1ID+"/status", staffAccess, map[string]any{"status": "washing"}); r.status != http.StatusOK {
+		t.Fatalf("advance to washing: expected 200, got %d (%v)", r.status, r.body)
+	}
+
+	t.Run("board reflects box 1 washing (with enriched car/phone/service), box 2 still waiting", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, boardPath, staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		if resp.body["boxes_active"] != float64(1) {
+			t.Fatalf("expected boxes_active=1, got %v", resp.body)
+		}
+		boxes, _ := resp.body["boxes"].([]any)
+		box1 := findBoxItem(t, boxes, 1)
+		current, _ := box1["current"].(map[string]any)
+		if current == nil {
+			t.Fatalf("expected box 1 to have a current booking, got %v", box1)
+		}
+		if current["status"] != "washing" || current["service_name"] != "Quick Wash" ||
+			current["car_name"] != "Board Test Car" || current["customer_phone_last4"] != customerLast4 {
+			t.Fatalf("box 1 current didn't match expected enrichment, got %v", current)
+		}
+		if current["id"] != nil {
+			t.Fatalf("board's current booking should have no id field (summary screen, not a detail link), got %v", current)
+		}
+
+		box2 := findBoxItem(t, boxes, 2)
+		if box2["current"] != nil {
+			t.Fatalf("expected box 2 to still be free, got %v", box2)
+		}
+
+		waiting, _ := resp.body["waiting"].([]any)
+		if len(waiting) != 1 {
+			t.Fatalf("expected exactly 1 waiting item (booking1 moved to washing), got %v", waiting)
+		}
+		item, _ := waiting[0].(map[string]any)
+		if item["id"] != booking2.str("id") || item["box_number"] != float64(2) ||
+			item["service_name"] != "Quick Wash" || item["car_name"] != "Board Test Car 2" ||
+			item["customer_phone_last4"] != customer2Last4 {
+			t.Fatalf("waiting item didn't match booking2's expected enrichment, got %v", item)
+		}
+	})
+}
+
 // findBoxItem returns the live-boxes item with the given number, failing
 // the test if it's missing.
 func findBoxItem(t *testing.T, items []any, number float64) map[string]any {

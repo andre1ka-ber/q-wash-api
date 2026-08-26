@@ -73,11 +73,13 @@ func NewHandler(
 // RegisterRoutes mounts availability (public), booking create/get/cancel
 // (any authenticated user, ownership enforced internally), the staff-only
 // network-wide board + notification-adjacent surface (requireStaff:
-// staff/admin), and the per-point live board/status/pause/resume/live-boxes
+// staff/admin), the per-point live board/status/pause/resume/live-boxes
 // surface (requireQueueOps: staff/worker/admin, docs/PLAN_WEB_APPS.md
-// phase 7 — worker needs these but not the staff-only ones). Everything
-// for a given path prefix is registered in one Route() call with
-// per-method middleware via chi's With(...) — see the note in
+// phase 7 — worker needs these but not the staff-only ones), and the
+// lobby-display board summary (requireStaff, phase 8 — the display kiosk
+// logs in as staff/admin, not a new role; worker doesn't need this one).
+// Everything for a given path prefix is registered in one Route() call
+// with per-method middleware via chi's With(...) — see the note in
 // washingpoint.Handler.RegisterRoutes for why (chi panics if the same
 // prefix is Mount()ed from two separate calls).
 func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) http.Handler, requireStaff, requireQueueOps []func(http.Handler) http.Handler) {
@@ -91,6 +93,10 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 
 	r.Route("/washing-points/{id}/boxes/live", func(live chi.Router) {
 		live.With(requireQueueOps...).Get("/", h.boxesLive)
+	})
+
+	r.Route("/washing-points/{id}/board", func(brd chi.Router) {
+		brd.With(requireStaff...).Get("/", h.board)
 	})
 
 	r.Route("/queue", func(q chi.Router) {
@@ -880,6 +886,181 @@ func (h *Handler) toLiveBoxItems(ctx context.Context, boxes []box.Box, rows []Qu
 		items[i] = item
 	}
 	return items, nil
+}
+
+// board is the lobby-display screen's one summary endpoint
+// (docs/PLAN_WEB_APPS.md phase 8): boxes joined with whatever they're
+// currently washing (nil "current" = free), plus a flat, time-ordered
+// waiting list across every box for the rest of today. No ticket-number
+// field exists anywhere in the data model (see PLAN_WEB_APPS.md's "Open
+// assumptions" — a real one would need a per-day sequence column plus a
+// matching change in the customer-facing q-wash app, out of scope for
+// this endpoint), so customer identity here is car name + last-4 phone
+// digits, same convention as the network board/live-boxes endpoints
+// above — decided with the user for this endpoint specifically, even
+// though this screen faces a room of other customers, not just staff.
+func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	if !ok {
+		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
+		return
+	}
+	washingPointID, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(washingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	boxes, err := h.boxRepo.ListByWashingPoint(r.Context(), washingPointID)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	// Today only, businessLocation-bounded — unlike boxesLive's deliberately
+	// unfiltered query, a lobby TV showing a booking from next week in its
+	// waiting list would just be noise for whoever's standing in front of it.
+	dayStart, dayEnd := dayBounds(time.Now())
+	rows, err := h.repo.ListLiveByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	userIDs := make([]uuid.UUID, 0, len(rows))
+	carIDs := make([]uuid.UUID, 0, len(rows))
+	serviceIDs := make([]uuid.UUID, 0, len(rows))
+	seenUser := make(map[uuid.UUID]bool, len(rows))
+	seenCar := make(map[uuid.UUID]bool, len(rows))
+	seenService := make(map[uuid.UUID]bool, len(rows))
+	for _, row := range rows {
+		if !seenUser[row.UserID] {
+			seenUser[row.UserID] = true
+			userIDs = append(userIDs, row.UserID)
+		}
+		if !seenCar[row.CarID] {
+			seenCar[row.CarID] = true
+			carIDs = append(carIDs, row.CarID)
+		}
+		if !seenService[row.ServiceID] {
+			seenService[row.ServiceID] = true
+			serviceIDs = append(serviceIDs, row.ServiceID)
+		}
+	}
+	users, err := h.userRepo.FindByIDs(r.Context(), userIDs)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	cars, err := h.carRepo.FindByIDs(r.Context(), carIDs)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	services, err := h.serviceRepo.FindByIDs(r.Context(), serviceIDs)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	phoneByUser := make(map[uuid.UUID]string, len(users))
+	for _, u := range users {
+		phoneByUser[u.ID] = u.PhoneNumber
+	}
+	nameByCar := make(map[uuid.UUID]string, len(cars))
+	for _, c := range cars {
+		nameByCar[c.ID] = c.Name
+	}
+	nameByService := make(map[uuid.UUID]string, len(services))
+	for _, s := range services {
+		nameByService[s.ID] = s.Name
+	}
+
+	currentByBox := make(map[int]Queue, len(boxes))
+	waitingRows := make([]Queue, 0, len(rows))
+	for _, row := range rows {
+		if row.Status == StatusWashing {
+			currentByBox[row.BoxNumber] = row
+			continue
+		}
+		waitingRows = append(waitingRows, row)
+	}
+
+	respBoxes := make([]boardBoxResponse, len(boxes))
+	boxesActive := 0
+	for i, b := range boxes {
+		item := boardBoxResponse{Number: b.Number, Label: b.Label, IsOpen: b.IsOpen}
+		if cur, ok := currentByBox[b.Number]; ok {
+			item.Current = &boardBookingResponse{
+				Status:             string(cur.Status),
+				ServiceName:        nameByService[cur.ServiceID],
+				ScheduledStartAt:   cur.ScheduledStartAt,
+				ScheduledEndAt:     cur.ScheduledEndAt,
+				PausedAt:           cur.PausedAt,
+				CustomerPhoneLast4: lastNDigits(phoneByUser[cur.UserID], 4),
+				CarName:            nameByCar[cur.CarID],
+			}
+			boxesActive++
+		}
+		respBoxes[i] = item
+	}
+
+	respWaiting := make([]boardWaitingItemResponse, len(waitingRows))
+	for i, row := range waitingRows {
+		respWaiting[i] = boardWaitingItemResponse{
+			ID:                 row.ID.String(),
+			Status:             string(row.Status),
+			BoxNumber:          row.BoxNumber,
+			ServiceName:        nameByService[row.ServiceID],
+			ScheduledStartAt:   row.ScheduledStartAt,
+			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
+			CarName:            nameByCar[row.CarID],
+		}
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, boardResponse{
+		BoxesActive: boxesActive,
+		BoxesTotal:  len(boxes),
+		Boxes:       respBoxes,
+		Waiting:     respWaiting,
+	})
+}
+
+type boardBookingResponse struct {
+	Status             string     `json:"status"`
+	ServiceName        string     `json:"service_name,omitempty"`
+	ScheduledStartAt   time.Time  `json:"scheduled_start_at"`
+	ScheduledEndAt     time.Time  `json:"scheduled_end_at"`
+	PausedAt           *time.Time `json:"paused_at,omitempty"`
+	CustomerPhoneLast4 string     `json:"customer_phone_last4"`
+	CarName            string     `json:"car_name,omitempty"`
+}
+
+type boardBoxResponse struct {
+	Number  int                   `json:"number"`
+	Label   *string               `json:"label,omitempty"`
+	IsOpen  bool                  `json:"is_open"`
+	Current *boardBookingResponse `json:"current,omitempty"`
+}
+
+type boardWaitingItemResponse struct {
+	ID                 string    `json:"id"`
+	Status             string    `json:"status"`
+	BoxNumber          int       `json:"box_number"`
+	ServiceName        string    `json:"service_name,omitempty"`
+	ScheduledStartAt   time.Time `json:"scheduled_start_at"`
+	CustomerPhoneLast4 string    `json:"customer_phone_last4"`
+	CarName            string    `json:"car_name,omitempty"`
+}
+
+type boardResponse struct {
+	BoxesActive int                        `json:"boxes_active"`
+	BoxesTotal  int                        `json:"boxes_total"`
+	Boxes       []boardBoxResponse         `json:"boxes"`
+	Waiting     []boardWaitingItemResponse `json:"waiting"`
 }
 
 func lastNDigits(s string, n int) string {

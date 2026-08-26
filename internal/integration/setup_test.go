@@ -390,3 +390,16 @@ func futureBookingTime(daysAhead int) string {
 func futureBookingDate(daysAhead int) string {
 	return time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, daysAhead).Format("2006-01-02")
 }
+
+// todayBookingTime returns an RFC3339 timestamp minutesFromNow from real
+// wall-clock now — for GET .../board, which (unlike every other endpoint
+// above) always scopes to *today* server-side with no ?date= override, so
+// tests exercising it can't book days ahead the way futureBookingTime does.
+// Callers must give the washing point wide-open hours (e.g. "00:00"/"23:59")
+// so this never trips outside_operating_hours regardless of real time of day,
+// and should keep minutesFromNow small — a large offset risks crossing into
+// tomorrow in businessLocation (Asia/Dushanbe) if run near local midnight,
+// same real-time edge case futureBookingTime's own doc comment calls out.
+func todayBookingTime(minutesFromNow int) string {
+	return time.Now().UTC().Add(time.Duration(minutesFromNow) * time.Minute).Format(time.RFC3339)
+}

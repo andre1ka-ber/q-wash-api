@@ -334,9 +334,14 @@ router group.
       `queue.Handler`, not `box.Handler`, to reuse queue's booking-enrichment
       helpers without an import cycle) joins each box with its current or
       next booking. See `PROGRESS.md` for the full write-up.
-- [ ] **8 — Display board**: `GET /washing-points/{id}/board` (staff/admin
+- [x] **8 — Display board**: `GET /washing-points/{id}/board` (staff/admin
       RBAC, same login every other app uses — no new auth mechanism, see
-      the `q-wash-display` section above), optional SSE variant.
+      the `q-wash-display` section above). Optional SSE variant (`GET
+      .../board/events`) **not built** — polling ships first per
+      `q-wash-display/PLAN.md`'s own decision, SSE is a later upgrade, not
+      required for v1. No ticket-number field and no average-wait-time
+      stat, both grilled with the user rather than guessed — see
+      `PROGRESS.md`.
 - [ ] **9 — Docs + tests**: `docs/API.md`, `docs/openapi.yaml`,
       `docs/DATA_MODEL.md` updated per phase (not batched at the end);
       unit tests throughout; integration tests for the new RBAC surface

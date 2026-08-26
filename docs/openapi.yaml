@@ -646,6 +646,36 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/washing-points/{id}/board:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: getDisplayBoard
+      summary: Lobby-display kiosk's summary screen
+      description: >
+        Requires role `staff` or `admin` (docs/PLAN_WEB_APPS.md phase 8) —
+        unlike boxes/live and the per-point queue board, `worker` cannot
+        reach this one, since the display kiosk logs in as staff/admin, not
+        a new role. Boxes joined with today's currently-washing booking
+        (current, nil = free) plus a flat, scheduled_start_at-ordered
+        waiting list across every box for the rest of today. No
+        ticket-number field exists anywhere in the data model; customer
+        identity is car_name + customer_phone_last4, same convention as
+        the other board endpoints, decided with the user for this endpoint
+        even though it's the one screen visible to a room of other
+        customers. No average-wait-time stat — nothing computes one.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DisplayBoard" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/services:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -1741,6 +1771,56 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/LiveBox" } }
       required: [items]
+
+    DisplayBoardBooking:
+      type: object
+      description: >
+        A box's currently-washing booking on the display board — same
+        display-oriented fields as LiveBoxBooking, but no id (the board
+        never links to a single booking, it's a summary screen).
+      properties:
+        status: { type: string, enum: [washing] }
+        service_name: { type: string }
+        scheduled_start_at: { type: string, format: date-time }
+        scheduled_end_at: { type: string, format: date-time }
+        paused_at: { type: string, format: date-time, nullable: true }
+        customer_phone_last4: { type: string, example: "0003" }
+        car_name: { type: string, example: "Demo Car" }
+      required: [status, scheduled_start_at, scheduled_end_at, customer_phone_last4]
+
+    DisplayBoardBox:
+      type: object
+      properties:
+        number: { type: integer, minimum: 1 }
+        label: { type: string, nullable: true }
+        is_open: { type: boolean }
+        current: { $ref: "#/components/schemas/DisplayBoardBooking" }
+      required: [number, is_open]
+
+    DisplayBoardWaitingItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queue, waiting] }
+        box_number: { type: integer, minimum: 1 }
+        service_name: { type: string }
+        scheduled_start_at: { type: string, format: date-time }
+        customer_phone_last4: { type: string, example: "0003" }
+        car_name: { type: string, example: "Demo Car" }
+      required: [id, status, box_number, scheduled_start_at, customer_phone_last4]
+
+    DisplayBoard:
+      type: object
+      description: >
+        boxes_active counts boxes with a current booking (regardless of
+        is_open — a box already mid-wash when closed still counts);
+        boxes_total is every box regardless of open/closed state.
+      properties:
+        boxes_active: { type: integer, minimum: 0 }
+        boxes_total: { type: integer, minimum: 0 }
+        boxes: { type: array, items: { $ref: "#/components/schemas/DisplayBoardBox" } }
+        waiting: { type: array, items: { $ref: "#/components/schemas/DisplayBoardWaitingItem" } }
+      required: [boxes_active, boxes_total, boxes, waiting]
 
     PaginatedBookings:
       type: object
