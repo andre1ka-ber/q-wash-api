@@ -97,6 +97,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 
 	r.Route("/washing-points/{id}/board", func(brd chi.Router) {
 		brd.With(requireStaff...).Get("/", h.board)
+		brd.With(requireStaff...).Get("/events", h.boardEvents)
 	})
 
 	r.Route("/queue", func(q chi.Router) {
@@ -915,20 +916,31 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	boxes, err := h.boxRepo.ListByWashingPoint(r.Context(), washingPointID)
+	resp, err := h.buildBoardResponse(r.Context(), washingPointID)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// buildBoardResponse is board's query/enrichment logic, factored out so
+// boardEvents can rebuild the same snapshot on every push without
+// duplicating it — the auth/ownership check stays in each caller since it
+// only needs to happen once per connection, not once per snapshot.
+func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UUID) (boardResponse, error) {
+	boxes, err := h.boxRepo.ListByWashingPoint(ctx, washingPointID)
+	if err != nil {
+		return boardResponse{}, err
 	}
 
 	// Today only, businessLocation-bounded — unlike boxesLive's deliberately
 	// unfiltered query, a lobby TV showing a booking from next week in its
 	// waiting list would just be noise for whoever's standing in front of it.
 	dayStart, dayEnd := dayBounds(time.Now())
-	rows, err := h.repo.ListLiveByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
+	rows, err := h.repo.ListLiveByWashingPointAndDate(ctx, washingPointID, dayStart, dayEnd)
 	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
+		return boardResponse{}, err
 	}
 
 	userIDs := make([]uuid.UUID, 0, len(rows))
@@ -951,20 +963,17 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 			serviceIDs = append(serviceIDs, row.ServiceID)
 		}
 	}
-	users, err := h.userRepo.FindByIDs(r.Context(), userIDs)
+	users, err := h.userRepo.FindByIDs(ctx, userIDs)
 	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
+		return boardResponse{}, err
 	}
-	cars, err := h.carRepo.FindByIDs(r.Context(), carIDs)
+	cars, err := h.carRepo.FindByIDs(ctx, carIDs)
 	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
+		return boardResponse{}, err
 	}
-	services, err := h.serviceRepo.FindByIDs(r.Context(), serviceIDs)
+	services, err := h.serviceRepo.FindByIDs(ctx, serviceIDs)
 	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
+		return boardResponse{}, err
 	}
 	phoneByUser := make(map[uuid.UUID]string, len(users))
 	for _, u := range users {
@@ -1021,12 +1030,12 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	httputil.WriteJSON(w, http.StatusOK, boardResponse{
+	return boardResponse{
 		BoxesActive: boxesActive,
 		BoxesTotal:  len(boxes),
 		Boxes:       respBoxes,
 		Waiting:     respWaiting,
-	})
+	}, nil
 }
 
 type boardBookingResponse struct {
@@ -1096,6 +1105,82 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 		items[i] = resp
 	}
 	httputil.WritePaginated(w, http.StatusOK, items, pagination, total)
+}
+
+// boardEvents streams the display board as text/event-stream: an initial
+// snapshot immediately, then a fresh one whenever anything changes for this
+// washing point (a booking created/canceled/advanced, or a box opened/
+// closed), until the client disconnects. Same requireStaff gate and
+// washing-point ownership check as board — the kiosk logs in as staff/admin,
+// no new role, per PLAN_WEB_APPS.md phase 8's own decision.
+func (h *Handler) boardEvents(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	if !ok {
+		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
+		return
+	}
+	washingPointID, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(washingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httputil.WriteError(w, r, apperror.Internal(fmt.Errorf("streaming unsupported")))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeSnapshot := func() (stop bool) {
+		resp, err := h.buildBoardResponse(r.Context(), washingPointID)
+		if err != nil {
+			return true
+		}
+		payload, err := json.Marshal(resp)
+		if err != nil {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return true
+		}
+		flusher.Flush()
+		return false
+	}
+
+	if writeSnapshot() {
+		return
+	}
+
+	changed, unsubscribe := h.bus.Subscribe(washingPointID)
+	defer unsubscribe()
+
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-changed:
+			if writeSnapshot() {
+				return
+			}
+		}
+	}
 }
 
 // events streams the caller's booking as text/event-stream: an initial

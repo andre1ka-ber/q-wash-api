@@ -8,16 +8,18 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/eventbus"
 	"q-wash-api/internal/platform/reqctx"
 )
 
 type Handler struct {
 	repo    *Repository
 	manager *Manager
+	bus     *eventbus.Bus
 }
 
-func NewHandler(repo *Repository, manager *Manager) *Handler {
-	return &Handler{repo: repo, manager: manager}
+func NewHandler(repo *Repository, manager *Manager, bus *eventbus.Bus) *Handler {
+	return &Handler{repo: repo, manager: manager, bus: bus}
 }
 
 // RegisterRoutes mounts /washing-points/{id}/boxes: list is public (same
@@ -131,12 +133,20 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		}
 		b.Label = label
 	}
+	openChanged := req.IsOpen != nil && *req.IsOpen != b.IsOpen
 	if req.IsOpen != nil {
 		b.IsOpen = *req.IsOpen
 	}
 	if err := h.repo.Update(r.Context(), b); err != nil {
 		httputil.WriteError(w, r, err)
 		return
+	}
+	// A closed/opened box changes what board()/boardEvents() would show
+	// (boxes_active, the per-box is_open flag) — publish so any open SSE
+	// board stream picks it up, same as every other board-affecting queue
+	// mutation already does.
+	if openChanged {
+		h.bus.Publish(b.WashingPointID)
 	}
 	httputil.WriteJSON(w, http.StatusOK, toResponse(b))
 }

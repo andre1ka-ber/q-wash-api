@@ -676,6 +676,33 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/washing-points/{id}/board/events:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: streamDisplayBoard
+      summary: Live-updating stream of the display board (SSE)
+      description: >
+        Same role gate as getDisplayBoard (staff/admin, not worker).
+        text/event-stream: a DisplayBoard snapshot immediately, then again
+        whenever anything changes for this washing point — a booking
+        created/canceled/status-advanced/paused/resumed, or a box
+        opened/closed — until the client disconnects. A `: ping` comment is
+        sent every 25s, same as streamBooking. Not representable as a normal
+        JSON response — see the description for the actual event payload
+        shape (same as DisplayBoard).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: text/event-stream of DisplayBoard snapshots
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/services:
     parameters:
       - $ref: "#/components/parameters/washingPointId"

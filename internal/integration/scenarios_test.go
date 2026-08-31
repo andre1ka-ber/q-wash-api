@@ -3,9 +3,14 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"q-wash-api/internal/user"
 )
@@ -1315,6 +1320,154 @@ func TestDisplayBoard_RBACAndTodayScoping(t *testing.T) {
 			item["service_name"] != "Quick Wash" || item["car_name"] != "Board Test Car 2" ||
 			item["customer_phone_last4"] != customer2Last4 {
 			t.Fatalf("waiting item didn't match booking2's expected enrichment, got %v", item)
+		}
+	})
+}
+
+// sseFrames reads "data: ...\n\n" frames off an open SSE response body,
+// decoding each as JSON and skipping ": ping\n\n" heartbeat comment lines.
+// A read blocks until the request's own context deadline fires, so a
+// missing push fails the test instead of hanging forever.
+type sseFrames struct {
+	r *bufio.Reader
+}
+
+func (s *sseFrames) next(t *testing.T) map[string]any {
+	t.Helper()
+	for {
+		line, err := s.r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read SSE stream: %v", err)
+		}
+		line = strings.TrimRight(line, "\n")
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
+			t.Fatalf("decode SSE payload: %v (%q)", err, line)
+		}
+		return payload
+	}
+}
+
+// TestDisplayBoardEvents_PushesOnBoxToggleAndStatusChange covers the new
+// GET .../board/events SSE route: an initial snapshot on connect, then a
+// fresh push when a box is closed (internal/box's new bus.Publish call
+// site) and again when a booking's status changes (queue's pre-existing
+// call sites, reused here for the first time by a board-shaped consumer).
+func TestDisplayBoardEvents_PushesOnBoxToggleAndStatusChange(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(120), user.RoleAdmin)
+	staffPhone := uniquePhone(121)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	customerAccess := env.loginAs(t, uniquePhone(122), "")
+
+	wp := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Board Events Point", "address": "1 Test St", "latitude": 1.0, "longitude": 2.0,
+		"boxes_count": 1, "open_time": "00:00", "close_time": "23:59",
+	})
+	if wp.status != http.StatusCreated {
+		t.Fatalf("create wp: expected 201, got %d (%v)", wp.status, wp.body)
+	}
+	wpID := wp.str("id")
+	env.setWashingPointID(t, staffPhone, wpID)
+	staffAccess := env.reLogin(t, staffPhone)
+
+	boxes := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/boxes", staffAccess, nil)
+	items, _ := boxes.body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 auto-seeded box, got %v", items)
+	}
+	boxID, _ := items[0].(map[string]any)["id"].(string)
+
+	svc := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/services", adminAccess, map[string]any{
+		"name": "Quick Wash", "duration_minutes": 30,
+		"price_options": []map[string]any{{"name": "Standard", "price_cents": 500}},
+	})
+	priceOptions, _ := svc.body["price_options"].([]any)
+	priceOptionID, _ := priceOptions[0].(map[string]any)["id"].(string)
+	svcID := svc.str("id")
+
+	t.Run("unauthenticated cannot open the stream", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/board/events", "", nil)
+		if resp.status != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, env.baseURL+"/api/v1/washing-points/"+wpID+"/board/events", nil)
+	if err != nil {
+		t.Fatalf("build SSE request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+staffAccess)
+	resp, err := env.client.Do(req)
+	if err != nil {
+		t.Fatalf("open SSE stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected text/event-stream, got %q", ct)
+	}
+	frames := &sseFrames{r: bufio.NewReader(resp.Body)}
+
+	t.Run("initial snapshot on connect", func(t *testing.T) {
+		frame := frames.next(t)
+		if frame["boxes_active"] != float64(0) || frame["boxes_total"] != float64(1) {
+			t.Fatalf("expected boxes_active=0 boxes_total=1, got %v", frame)
+		}
+	})
+
+	t.Run("closing the box pushes a fresh snapshot reflecting is_open:false", func(t *testing.T) {
+		toggle := env.do(t, http.MethodPatch, "/api/v1/washing-points/"+wpID+"/boxes/"+boxID, staffAccess, map[string]any{"is_open": false})
+		if toggle.status != http.StatusOK {
+			t.Fatalf("close box: expected 200, got %d (%v)", toggle.status, toggle.body)
+		}
+		frame := frames.next(t)
+		pushedBoxes, _ := frame["boxes"].([]any)
+		if len(pushedBoxes) != 1 {
+			t.Fatalf("expected 1 box in pushed snapshot, got %v", frame)
+		}
+		box, _ := pushedBoxes[0].(map[string]any)
+		if box["is_open"] != false {
+			t.Fatalf("expected pushed snapshot to show is_open:false, got %v", box)
+		}
+	})
+
+	t.Run("advancing a booking to washing pushes another snapshot reflecting boxes_active:1", func(t *testing.T) {
+		reopen := env.do(t, http.MethodPatch, "/api/v1/washing-points/"+wpID+"/boxes/"+boxID, staffAccess, map[string]any{"is_open": true})
+		if reopen.status != http.StatusOK {
+			t.Fatalf("reopen box: expected 200, got %d (%v)", reopen.status, reopen.body)
+		}
+		frames.next(t) // the reopen's own push, not under test here
+
+		carID := env.createCar(t, customerAccess, "Board Events Car")
+		booking := env.do(t, http.MethodPost, "/api/v1/queue", customerAccess, map[string]any{
+			"car_id": carID, "service_id": svcID, "box_number": 1,
+			"price_option_id": priceOptionID, "scheduled_start_at": todayBookingTime(15),
+		})
+		if booking.status != http.StatusCreated {
+			t.Fatalf("create booking: expected 201, got %d (%v)", booking.status, booking.body)
+		}
+		frames.next(t) // the booking creation's own push
+
+		bookingID := booking.str("id")
+		if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+bookingID+"/status", staffAccess, map[string]any{"status": "waiting"}); r.status != http.StatusOK {
+			t.Fatalf("advance to waiting: expected 200, got %d (%v)", r.status, r.body)
+		}
+		frames.next(t) // the "waiting" transition's own push
+
+		if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+bookingID+"/status", staffAccess, map[string]any{"status": "washing"}); r.status != http.StatusOK {
+			t.Fatalf("advance to washing: expected 200, got %d (%v)", r.status, r.body)
+		}
+		frame := frames.next(t)
+		if frame["boxes_active"] != float64(1) {
+			t.Fatalf("expected boxes_active=1 after advancing to washing, got %v", frame)
 		}
 	})
 }

@@ -59,9 +59,11 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	scheduleManager := schedule.NewManager(scheduleRepo)
 	scheduleHandler := schedule.NewHandler(scheduleRepo, scheduleManager, wpRepo)
 
+	queueBus := eventbus.New()
+
 	boxRepo := box.NewRepository(database)
 	boxManager := box.NewManager(boxRepo)
-	boxHandler := box.NewHandler(boxRepo, boxManager)
+	boxHandler := box.NewHandler(boxRepo, boxManager, queueBus)
 
 	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager, boxManager)
 
@@ -72,7 +74,6 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	carRepo := car.NewRepository(database)
 	carHandler := car.NewHandler(carRepo)
 
-	queueBus := eventbus.New()
 	queueRepo := queue.NewRepository(database)
 	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, boxRepo, queueBus)
 	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, boxRepo, queueBus)
