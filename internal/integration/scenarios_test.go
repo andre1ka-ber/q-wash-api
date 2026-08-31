@@ -1485,3 +1485,136 @@ func findBoxItem(t *testing.T, items []any, number float64) map[string]any {
 	t.Fatalf("box %v not found in %v", number, items)
 	return nil
 }
+
+// TestConnectionRequests_ApproveRejectLifecycle covers the admin app's
+// onboarding queue (internal/connectionrequest): every route is
+// admin-only, approving one creates an Owner + a pending_review
+// WashingPoint with its default schedule/boxes seeded (Manager.Approve),
+// rejecting one leaves no such side effects, and neither can be reviewed
+// twice.
+func TestConnectionRequests_ApproveRejectLifecycle(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(80), user.RoleAdmin)
+	staffAccess := env.loginAs(t, uniquePhone(81), user.RoleStaff)
+
+	newRequestBody := func(businessName string) map[string]any {
+		return map[string]any{
+			"business_name": businessName, "contact_name": "Jane Doe",
+			"contact_phone": "+15559990000", "address": "1 Onboarding Way",
+			"boxes_count": 2,
+		}
+	}
+
+	t.Run("staff is forbidden from the connection-requests queue", func(t *testing.T) {
+		resp := env.do(t, http.MethodPost, "/api/v1/connection-requests", staffAccess, newRequestBody("Staff Attempt LLC"))
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("expected 403 for staff creating a connection request, got %d (%v)", resp.status, resp.body)
+		}
+		resp = env.do(t, http.MethodGet, "/api/v1/connection-requests", staffAccess, nil)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("expected 403 for staff listing connection requests, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("approving creates a pending_review washing point with default schedule and boxes", func(t *testing.T) {
+		businessName := "Approved Wash Co"
+		created := env.do(t, http.MethodPost, "/api/v1/connection-requests", adminAccess, newRequestBody(businessName))
+		if created.status != http.StatusCreated {
+			t.Fatalf("create connection request: expected 201, got %d (%v)", created.status, created.body)
+		}
+		if created.str("status") != "new" {
+			t.Fatalf("expected status=new on creation, got %q", created.str("status"))
+		}
+		requestID := created.str("id")
+
+		approved := env.do(t, http.MethodPatch, "/api/v1/connection-requests/"+requestID, adminAccess, map[string]any{"status": "approved"})
+		if approved.status != http.StatusOK {
+			t.Fatalf("approve: expected 200, got %d (%v)", approved.status, approved.body)
+		}
+		if approved.str("status") != "approved" {
+			t.Errorf("expected status=approved, got %q", approved.str("status"))
+		}
+		if approved.str("reviewed_by") == "" {
+			t.Error("expected reviewed_by to be set")
+		}
+		if approved.body["reviewed_at"] == nil {
+			t.Error("expected reviewed_at to be set")
+		}
+
+		list := env.do(t, http.MethodGet, "/api/v1/admin/washing-points", adminAccess, nil)
+		if list.status != http.StatusOK {
+			t.Fatalf("list washing points: expected 200, got %d (%v)", list.status, list.body)
+		}
+		items, _ := list.body["items"].([]any)
+		var wpID string
+		for _, raw := range items {
+			item, _ := raw.(map[string]any)
+			if item["name"] == businessName {
+				wpID = item["id"].(string)
+				if item["status"] != "pending_review" {
+					t.Errorf("expected the approved point's status to be pending_review, got %v", item["status"])
+				}
+			}
+		}
+		if wpID == "" {
+			t.Fatalf("expected a washing point named %q to have been created on approval", businessName)
+		}
+
+		schedule := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/schedule", "", nil)
+		if schedule.status != http.StatusOK {
+			t.Fatalf("get schedule: expected 200, got %d (%v)", schedule.status, schedule.body)
+		}
+		scheduleItems, _ := schedule.body["items"].([]any)
+		if len(scheduleItems) != 7 {
+			t.Errorf("expected a seeded 7-row schedule, got %d rows", len(scheduleItems))
+		}
+
+		boxes := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/boxes", "", nil)
+		if boxes.status != http.StatusOK {
+			t.Fatalf("get boxes: expected 200, got %d (%v)", boxes.status, boxes.body)
+		}
+		boxItems, _ := boxes.body["items"].([]any)
+		if len(boxItems) != 2 {
+			t.Errorf("expected 2 seeded boxes (matching boxes_count on the request), got %d", len(boxItems))
+		}
+
+		reReview := env.do(t, http.MethodPatch, "/api/v1/connection-requests/"+requestID, adminAccess, map[string]any{"status": "rejected"})
+		if reReview.status != http.StatusConflict {
+			t.Fatalf("expected 409 re-reviewing an already-approved request, got %d (%v)", reReview.status, reReview.body)
+		}
+	})
+
+	t.Run("rejecting leaves no washing point behind and can't be re-reviewed", func(t *testing.T) {
+		businessName := "Rejected Wash Co"
+		created := env.do(t, http.MethodPost, "/api/v1/connection-requests", adminAccess, newRequestBody(businessName))
+		if created.status != http.StatusCreated {
+			t.Fatalf("create connection request: expected 201, got %d (%v)", created.status, created.body)
+		}
+		requestID := created.str("id")
+
+		rejected := env.do(t, http.MethodPatch, "/api/v1/connection-requests/"+requestID, adminAccess, map[string]any{"status": "rejected"})
+		if rejected.status != http.StatusOK {
+			t.Fatalf("reject: expected 200, got %d (%v)", rejected.status, rejected.body)
+		}
+		if rejected.str("status") != "rejected" {
+			t.Errorf("expected status=rejected, got %q", rejected.str("status"))
+		}
+
+		list := env.do(t, http.MethodGet, "/api/v1/admin/washing-points", adminAccess, nil)
+		if list.status != http.StatusOK {
+			t.Fatalf("list washing points: expected 200, got %d (%v)", list.status, list.body)
+		}
+		items, _ := list.body["items"].([]any)
+		for _, raw := range items {
+			item, _ := raw.(map[string]any)
+			if item["name"] == businessName {
+				t.Fatalf("expected no washing point to be created for a rejected request, found %v", item)
+			}
+		}
+
+		reReview := env.do(t, http.MethodPatch, "/api/v1/connection-requests/"+requestID, adminAccess, map[string]any{"status": "approved"})
+		if reReview.status != http.StatusConflict {
+			t.Fatalf("expected 409 re-reviewing an already-rejected request, got %d (%v)", reReview.status, reReview.body)
+		}
+	})
+}
