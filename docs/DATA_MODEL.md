@@ -20,7 +20,7 @@ Customers authenticate via phone + OTP, no password. Staff/admin *additionally* 
 | id | uuid | PK |
 | phone_number | string | unique, E.164 format, indexed |
 | name | string, nullable | optional display name |
-| role | enum: `customer`, `staff`, `admin`, `worker` | default `customer`. `staff`/`admin` can manage washing points/services and advance queue status. `worker` (added for the shift-technician web app, see `PLAN_WEB_APPS.md`) logs in the same way staff/admin do; not yet wired to any endpoint. |
+| role | enum: `customer`, `staff`, `admin`, `worker` | default `customer`. `staff`/`admin` can manage washing points/services and advance queue status. `worker` (added for the shift-technician web app, see `PLAN_WEB_APPS.md`) logs in the same way staff/admin do; gated into the per-point live surface (queue board, status, pause/resume, live-boxes) via `requireQueueOps`, but not `requireStaff` (washing-point/service/photo/schedule/box management, network-wide `GET /queue`). |
 | washing_point_id | uuid, nullable | FK -> WashingPoint. Scopes a `staff`/`worker` account to the one point they work at; always NULL for `admin` (network-wide) and `customer`. Added for the multi-point web apps, see `PLAN_WEB_APPS.md`. |
 | last_login_at | timestamp, nullable | updated on successful OTP verify or password login |
 | username | string, nullable, unique | only set for staff/admin; NULL for customers. Postgres unique indexes permit multiple NULLs, so no partial index is needed. |
@@ -102,7 +102,7 @@ Approving one (`connectionrequest.Manager.Approve`) creates an `Owner`
 (reusing one whose `contact_phone` matches, if any) and a `WashingPoint`
 with `status = pending_review` and placeholder `latitude`/`longitude` of
 `0,0` — the request doesn't collect coordinates (that's the separate admin
-"+ New point" wizard flow, not yet built, which sets them directly); an
+"+ New point" wizard flow (`q-wash-admin`), which sets them directly); an
 admin must correct them via `PATCH /washing-points/{id}` before the point
 can go live. Rejecting or re-reviewing an already-reviewed request 409s
 `connection_request_already_reviewed`. See `PLAN_WEB_APPS.md`.

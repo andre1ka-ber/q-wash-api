@@ -13,15 +13,21 @@ added later without a rewrite.
 | DB access | GORM (models/queries); [golang-migrate](https://github.com/golang-migrate/migrate) with plain `.sql` files for schema versioning (no `AutoMigrate` in prod) |
 | Primary keys | UUIDv7 (time-ordered), generated in app code via `google/uuid` — better index locality than UUIDv4/`gen_random_uuid()` |
 | Auth | Phone number + SMS OTP, no password. JWT access token + rotating refresh token. |
-| Roles | `customer`, `staff`, `admin` on `User.role`. Staff/admin manage washing points/services and advance queue status; customers manage their own cars/bookings. |
+| Roles | `customer`, `staff`, `admin` on `User.role` at MVP scope (this doc). A fourth role, `worker`, was added later — see `docs/PLAN_WEB_APPS.md` phase 1/7. Staff/admin manage washing points/services and advance queue status; customers manage their own cars/bookings. |
 | SMS delivery | `SmsSender` interface; dev implementation logs the code to stdout. Real provider swapped in later behind the same interface. |
 | Washing point capacity | `boxes_count` field (default 2), configurable per point. Availability = sweep-line overlap check against this capacity. |
-| Operating hours | Single daily `open_time`/`close_time` per washing point (same every day) for MVP. |
+| Operating hours | Single daily `open_time`/`close_time` per washing point (same every day) for MVP. Superseded by a per-weekday schedule table — see `docs/PLAN_WEB_APPS.md` phase 5; the original columns are kept but now legacy/informational only. |
 | Service pricing | `ServicePriceOption` sub-table per service (e.g. car size, or scope like "full body"/"parts only"); every service has at least one (default) option. |
 
 See [DATA_MODEL.md](DATA_MODEL.md) for full schema and the availability algorithm, [API.md](API.md) for endpoint contracts.
 
 ## Project layout
+
+This is the original MVP layout below. Packages added later by
+`docs/PLAN_WEB_APPS.md` (`schedule`, `box`, `photo`, `owner`,
+`connectionrequest`, `admin`, `integration`, `platform/storage`) aren't
+reflected here — see the top-level [`README.md`](../README.md#project-layout)
+for the current, complete layout.
 
 ```
 cmd/api/main.go              entrypoint: config, DB, router, graceful shutdown
@@ -63,7 +69,7 @@ Each phase should leave the project in a compiling, runnable state. Tracked in [
 9. **History** — `GET /me/queue` (all statuses, paginated).
 10. **Notifications** — CRUD/list records; OTP send goes through the same `SmsSender` stub from phase 1.
 11. **Hardening** — consistent error responses, request validation, pagination helpers, seed script, README, unit + integration tests (testcontainers-go against real Postgres).
-12. **Future/optional** — Dockerfile for the API itself, multi-washing-point considerations doc, per-weekday schedules, push notifications, a background worker to actually send `pending` notifications whose `send_at` has arrived (currently only sent synchronously at creation time if already due — see DATA_MODEL.md).
+12. **Future/optional** — Dockerfile for the API itself, multi-washing-point considerations doc, push notifications, a background worker to actually send `pending` notifications whose `send_at` has arrived (currently only sent synchronously at creation time if already due — see DATA_MODEL.md). (Per-weekday schedules, originally listed here, shipped instead as `docs/PLAN_WEB_APPS.md` phase 5 — see that doc and `PROGRESS.md`.)
 
 ## Open assumptions to revisit
 

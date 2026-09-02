@@ -38,15 +38,18 @@ curl localhost:8080/api/v1/washing-points
 ```
 
 The seeded users (phone → role): `+15550000001` → admin, `+15550000002` →
-staff, `+15550000003` → customer. Log in as any of them via
-`POST /api/v1/auth/otp/request` — since there's no real SMS provider wired
-up, the OTP code is printed to the API's stdout log (`sms (stub, not
-actually sent)`), not actually sent anywhere.
+staff, `+15550000006` → worker, `+15550000003` → customer (plus two more
+demo customers used only to seed a double-booking scenario). Log in as any
+of them via `POST /api/v1/auth/otp/request` — since there's no real SMS
+provider wired up, the OTP code is printed to the API's stdout log (`sms
+(stub, not actually sent)`), not actually sent anywhere.
 
-The admin/staff accounts also get a username + password (seeded by
+The admin/staff/worker accounts also get a username + password (seeded by
 `cmd/seed`, dev-only) for `POST /api/v1/auth/login` — used by the queue
-board and staff panel instead of phone+OTP: `admin`/`admin12345` and
-`staff`/`staff12345`.
+board, staff panel, and `q-wash-worker` instead of phone+OTP:
+`admin`/`admin12345`, `staff`/`staff12345`, and `worker`/`worker12345`. The
+staff and worker accounts are both scoped to the seeded washing point via
+`washing_point_id`.
 
 ## API docs
 
@@ -74,18 +77,26 @@ to exercise the protected routes.
 
 Two tiers:
 
-- **Unit tests** (`make test`) — pure logic, no DB: the availability
-  sweep-line algorithm and box-assignment/status-transition rules in
-  `internal/queue`. Fast, run on every `go test ./...`.
+- **Unit tests** (`make test`) — pure logic, no DB, no mocks: the
+  availability sweep-line algorithm and box-assignment/status-transition
+  rules in `internal/queue`, phone/OTP/refresh-token generation in
+  `internal/auth`, schedule validation in `internal/schedule`,
+  time-parsing helpers in `internal/admin`, and local-disk photo storage
+  (put/delete round-trip, path-traversal rejection) in
+  `internal/platform/storage`. Fast, run on every `go test ./...`.
 - **Integration tests** (`make test-integration`) — full HTTP stack against
   a real, ephemeral Postgres container (via
   [testcontainers-go](https://golang.testcontainers.org/)), driven only
   through the same HTTP API a real client would use. Cover the auth flow
-  (OTP → tokens → refresh rotation → logout), RBAC, booking double-booking
-  prevention, cancel-then-rebook, and the forward-only status state
-  machine. Gated behind the `integration` build tag so a plain `go test
-  ./...` never needs Docker; each test function spins up and tears down its
-  own container.
+  (OTP → tokens → refresh rotation → logout), RBAC/ownership across
+  washing-point management, booking double-booking prevention,
+  cancel-then-rebook, the forward-only status state machine, photo
+  upload/ownership/cover-promotion, schedule seeding/validation, box
+  CRUD/availability filtering, worker-role RBAC and pause/resume, admin
+  network-wide views, connection-request approve/reject, and the display
+  board (including its SSE pushes). Gated behind the `integration` build
+  tag so a plain `go test ./...` never needs Docker; each test function
+  spins up and tears down its own container.
 
 ## Project layout
 
@@ -96,16 +107,23 @@ internal/app/   wires every feature's handlers onto one router (imported by
                 cmd/api and by the integration tests, so they exercise the
                 exact same server)
 internal/
-  auth/         phone+OTP login, JWT issue/verify, refresh rotation, RBAC middleware
+  auth/         phone+OTP login, staff/admin username+password login, JWT issue/verify, refresh rotation, RBAC middleware
   user/         GET/PATCH /me
   washingpoint/ washing point CRUD (public read, staff/admin write)
   service/      service + price-option CRUD, default-price invariants
   car/          customer's own cars (ownership-, not role-, scoped)
-  queue/        availability algorithm, booking create/cancel/status/history
+  queue/        availability algorithm, booking create/cancel/status/history, live queue/board (polling + SSE)
+  schedule/     per-weekday operating-hours CRUD + availability resolution
+  box/          box (bay) CRUD, is_open toggling
+  photo/        washing-point photo upload/CRUD, cover-photo promotion
+  owner/        owner (network operator) CRUD
+  connectionrequest/ prospective owner's onboarding request + admin approve/reject
+  admin/        network-wide admin views (washing-point list, stats)
   notification/ staff-sent notifications, delivered via the sms.Sender stub
   apperror/     typed error -> HTTP status/code mapping
   httputil/     JSON response helpers, pagination
-  platform/     db, jwt, sms, reqctx, httpserver (also serves /docs + /openapi.yaml) — infra with no business logic
+  integration/  full-HTTP-stack tests, gated behind the `integration` build tag
+  platform/     db, jwt, sms, reqctx, httpserver (also serves /docs + /openapi.yaml), storage (photo uploads) — infra with no business logic
 migrations/     golang-migrate .sql files, one pair per table
 docs/           PLAN.md (phases/decisions), DATA_MODEL.md (schema + algorithms),
                 API.md (endpoint contract, prose), openapi.yaml (endpoint contract, machine-readable,
@@ -122,9 +140,11 @@ booking algorithms.
 ## Configuration
 
 All config is env vars (see [`.env.example`](.env.example) for the full list
-with defaults) — DB connection, JWT secrets/TTLs, OTP TTL/cooldown/max-attempts.
-`.env` is loaded automatically in dev (and ignored by git); real environment
-variables always take precedence over it.
+with defaults) — app env/port, CORS origins, DB connection, JWT
+secrets/TTLs, OTP TTL/cooldown/max-attempts, and local photo-upload storage
+(`UPLOADS_DIR`/`UPLOADS_BASE_URL`). `.env` is loaded automatically in dev
+(and ignored by git); real environment variables always take precedence
+over it.
 
 ## Known limitations
 
@@ -134,10 +154,12 @@ variables always take precedence over it.
 - No background worker: a notification scheduled for the future (`send_at`
   after now) is created as `pending` and stays that way — there's nothing
   yet that sweeps due notifications and sends them later.
-- `GET /queue/{id}/events` (SSE) is backed by an in-memory pub/sub with no
-  persistence — a process restart drops all connected streams (clients are
-  expected to reconnect and/or refetch on foreground) and it doesn't scale
-  past one API instance without a shared broker.
+- Both SSE endpoints (`GET /queue/{id}/events`, `GET
+  /washing-points/{id}/board/events`) are backed by the same in-memory
+  pub/sub with no persistence — a process restart drops all connected
+  streams (clients are expected to reconnect and/or refetch on
+  foreground) and it doesn't scale past one API instance without a shared
+  broker.
 - Single washing point, single fixed timezone (`Asia/Dushanbe`, hardcoded —
   no per-point timezone field yet) — see the "open assumptions" section of
   `docs/PLAN.md` for what's designed to extend cleanly later versus what

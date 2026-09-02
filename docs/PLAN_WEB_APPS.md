@@ -1,6 +1,7 @@
 # Backend changes for the 4 staff/ops web apps — Plan
 
-Status: draft, not yet implemented. Written 2026-08-20 alongside the plans
+Status: phases 1–9 implemented (see the phased build order below and
+`PROGRESS.md` for the full write-ups). Written 2026-08-20 alongside the plans
 for four new web apps (`../../q-wash-admin`, `../../q-wash-cabinet`,
 `../../q-wash-worker`, `../../q-wash-display`) that replace the throwaway
 `pegasus-frontend`/`pegasus-board` test harnesses with real products, built
@@ -254,11 +255,13 @@ router group.
   shows last-4-phone-digits; the mock's display screen shows no customer
   identity at all, just car + service) — matches the existing privacy
   posture of never leaking one customer's data to another.
-- `GET /washing-points/{id}/board/events` — optional SSE variant reusing
-  the existing `internal/platform/eventbus` pub/sub from the customer
+- `GET /washing-points/{id}/board/events` — SSE variant reusing the
+  existing `internal/platform/eventbus` pub/sub from the customer
   queue-screen SSE work, so the lobby screen updates live instead of
-  polling. Nice-to-have, not required for v1 — polling is a fine
-  fallback, same as `pegasus-board` does today.
+  polling. Originally scoped as optional/deferred here (v1 shipped with
+  polling only); built 2026-08-31 once `q-wash-display/PLAN.md` resumed
+  its own deferred "SSE upgrade" phase — see phase 8 below and
+  `PROGRESS.md`. Polling remains a valid fallback either way.
 
 ## Phased build order
 
@@ -337,15 +340,19 @@ router group.
 - [x] **8 — Display board**: `GET /washing-points/{id}/board` (staff/admin
       RBAC, same login every other app uses — no new auth mechanism, see
       the `q-wash-display` section above). Optional SSE variant (`GET
-      .../board/events`) **not built** — polling ships first per
-      `q-wash-display/PLAN.md`'s own decision, SSE is a later upgrade, not
-      required for v1. No ticket-number field and no average-wait-time
-      stat, both grilled with the user rather than guessed — see
-      `PROGRESS.md`.
-- [ ] **9 — Docs + tests**: `docs/API.md`, `docs/openapi.yaml`,
+      .../board/events`) shipped 2026-08-31, once `q-wash-display/PLAN.md`
+      resumed its own deferred "SSE upgrade" phase — polling stays as the
+      fallback channel, not replaced. No ticket-number field and no
+      average-wait-time stat, both grilled with the user rather than
+      guessed — see `PROGRESS.md`.
+- [x] **9 — Docs + tests**: `docs/API.md`, `docs/openapi.yaml`,
       `docs/DATA_MODEL.md` updated per phase (not batched at the end);
-      unit tests throughout; integration tests for the new RBAC surface
-      (worker role) alongside the existing auth/RBAC integration suite.
+      unit tests now span `auth`/`schedule`/`admin`/`queue`/
+      `platform/storage`; integration tests cover RBAC/ownership, photos,
+      schedule, boxes, admin network-wide views, connection-request
+      approve/reject, and the display board (including its SSE pushes) —
+      see `PROGRESS.md`'s 2026-08-31 test-backfill entry for the full
+      write-up.
 
 Each phase should leave the project compiling and `make test` clean, same
 convention as `PLAN.md`. Log actual progress in `PROGRESS.md` as work
