@@ -4,6 +4,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 go build -o /out/seed ./cmd/seed
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates curl \
@@ -13,6 +14,7 @@ RUN apk add --no-cache ca-certificates curl \
 
 WORKDIR /app
 COPY --from=builder /out/api ./api
+COPY --from=builder /out/seed ./seed
 COPY migrations ./migrations
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
