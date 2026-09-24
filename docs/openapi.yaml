@@ -37,6 +37,10 @@ tags:
     description: Network-wide views (richer washing-point list, dashboard aggregates) for the admin app. Admin-only.
   - name: Photos
     description: Photos attached to a washing point's listing. Reads are public; writes require staff/admin, scoped to their own point.
+  - name: QR codes
+    description: >-
+      The admin's QR-code pool (generate/assign/disable), a staff-scoped
+      "my code" view, and a public unauthenticated scan endpoint.
   - name: Schedule
     description: Per-weekday operating hours, replacing the flat open_time/close_time columns as the source of truth for booking. Reads are public; writes require staff/admin, scoped to their own point.
   - name: Boxes
@@ -1419,6 +1423,214 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /api/v1/qr-codes/generate:
+    post:
+      tags: [QR codes]
+      operationId: generateQrCodes
+      summary: Generate a new batch of QR codes
+      description: Requires role admin. count must be 1-500.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QrCodeGenerate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCodeList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/qr-codes:
+    get:
+      tags: [QR codes]
+      operationId: listQrCodes
+      summary: List the QR-code pool
+      description: >
+        Requires role admin. Ordered by seq ascending. stats reflects the
+        unfiltered pool even when status/search narrow items.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [free, assigned, disabled] }
+        - name: search
+          in: query
+          schema: { type: string }
+          description: Matches the QW-#### code or the raw token, case-insensitive.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCodePoolList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/qr-codes/mine:
+    get:
+      tags: [QR codes]
+      operationId: getMyQrCode
+      summary: Get the caller's own washing point's QR code
+      description: >
+        Requires role staff (or admin). 400 no_washing_point if the account
+        isn't scoped to one; 404 qr_code_not_found if the point has no code
+        assigned yet.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/qr-codes/mine/request-replacement:
+    post:
+      tags: [QR codes]
+      operationId: requestQrCodeReplacement
+      summary: Ask an admin to replace a damaged/lost sticker
+      description: Requires role staff. 409 qr_code_not_assigned unless the caller's code is currently assigned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/qr-codes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [QR codes]
+      operationId: getQrCode
+      summary: Get a QR code's detail and stats
+      description: Requires role admin.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/qr-codes/{id}/assign:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [QR codes]
+      operationId: assignQrCode
+      summary: Assign a code to a washing point
+      description: >
+        Requires role admin. Frees whatever code the target point already
+        had (one code per point). 409 qr_code_disabled if the target code
+        is disabled.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QrCodeAssign" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/qr-codes/{id}/unassign:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [QR codes]
+      operationId: unassignQrCode
+      summary: Return a code to the free pool
+      description: Requires role admin.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/qr-codes/{id}/disable:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [QR codes]
+      operationId: disableQrCode
+      summary: Disable a code (damaged/lost)
+      description: >
+        Requires role admin. Terminal — also releases the code from its
+        point if it was assigned. A disabled code can't be reassigned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QrCode" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/qr-codes/scan/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [QR codes]
+      operationId: scanQrCode
+      summary: Record a scan and serve a landing page
+      description: >
+        Public, no auth. Always 200 with an HTML page — an unknown or
+        disabled token still gets a generic page, never a 404/500, to
+        avoid leaking pool state to whoever is scanning.
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema: { type: string }
+
   /api/v1/admin/washing-points:
     get:
       tags: [Admin]
@@ -2001,6 +2213,75 @@ components:
       properties:
         status: { type: string, enum: [approved, rejected] }
       required: [status]
+
+    QrCodeStats:
+      type: object
+      properties:
+        scans_today: { type: integer }
+        scans_7d: { type: integer }
+        scans_by_day:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              count: { type: integer }
+        bookings_via_qr:
+          type: integer
+          description: Best-effort heuristic, not exact attribution. 0 for an unassigned code.
+      required: [scans_today, scans_7d, scans_by_day, bookings_via_qr]
+
+    QrCode:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, description: "Human-facing sticker number, e.g. QW-0031, derived from seq." }
+        token: { type: string }
+        status: { type: string, enum: [free, assigned, disabled] }
+        batch_label: { type: string }
+        washing_point_id: { type: string, format: uuid, nullable: true }
+        washing_point_name: { type: string, nullable: true }
+        assigned_at: { type: string, format: date-time, nullable: true }
+        disabled_at: { type: string, format: date-time, nullable: true }
+        replacement_requested_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        stats: { $ref: "#/components/schemas/QrCodeStats" }
+      required: [id, code, token, status, batch_label, created_at]
+
+    QrCodeList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/QrCode" } }
+      required: [items]
+
+    QrCodePoolStats:
+      type: object
+      properties:
+        total: { type: integer }
+        free: { type: integer }
+        assigned: { type: integer }
+        disabled: { type: integer }
+      required: [total, free, assigned, disabled]
+
+    QrCodePoolList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/QrCode" } }
+        stats: { $ref: "#/components/schemas/QrCodePoolStats" }
+      required: [items, stats]
+
+    QrCodeGenerate:
+      type: object
+      properties:
+        count: { type: integer, minimum: 1, maximum: 500 }
+        batch_label: { type: string, maxLength: 255 }
+      required: [count, batch_label]
+
+    QrCodeAssign:
+      type: object
+      properties:
+        washing_point_id: { type: string, format: uuid }
+      required: [washing_point_id]
 
     AdminWashingPoint:
       type: object

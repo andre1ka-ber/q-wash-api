@@ -283,6 +283,52 @@ A user may have at most one active (`queue`/`waiting`/`washing`) booking at a ti
 
 > Added `user_id`, `queue_id`, `channel` beyond the original spec's four fields — needed to know who/what a notification is for and how to deliver it. Implemented in Phase 10 (`internal/notification`): `POST /notifications` (staff/admin) sends immediately through the same `sms.Sender` stub OTP uses, *if* `send_at` is due (now or past) — `status` becomes `sent`/`failed` and `sent_at` is set. A `send_at` in the future just creates the row as `pending` and leaves it there: there is still no background worker in this MVP to sweep due notifications and send them later, so a scheduled reminder never actually fires on its own yet (flagged as future work, see PLAN.md Phase 12). `GET /me/notifications` (any authenticated user, own records, paginated) is the read side.
 
+### QrCode
+A physical sticker in the admin's QR-code pool, generated ahead of
+printing and assigned one-per-`WashingPoint`. `qrcode.Handler` mounts
+`/qr-codes*` (`internal/qrcode`): `POST /qr-codes/generate`, `GET
+/qr-codes`, `GET /qr-codes/{id}`, `POST /qr-codes/{id}/assign|unassign|
+disable` (admin-only); `GET /qr-codes/mine`, `POST
+/qr-codes/mine/request-replacement` (staff, scoped to their own
+`WashingPointID`, same pattern as `internal/photo`); `GET
+/qr-codes/scan/{token}` (public, no auth — records a `QrScan` and serves a
+static HTML page). The human-facing sticker number (`QW-0031`) is derived
+from `seq` at read time (`QRCode.Code()`), never stored — one source of
+truth for what's printed. `status` plus the nullable `washing_point_id` is
+the whole assignment state machine: `free` -> `assigned` (-> `free` again
+on unassign) -> `disabled` (terminal, releases the point). One code per
+point is enforced by a unique constraint on `washing_point_id` (NULLs
+don't conflict) plus `Manager.Assign` proactively freeing whatever was
+already on the target point. `replacement_requested_at` is staff's
+one-button "my sticker is damaged" signal — no separate notification
+entity, the admin pool page filters/badges on this column instead, same
+"status field is the whole workflow" simplicity as `ConnectionRequest`.
+
+| field | type | notes |
+|---|---|---|
+| id | uuid | PK |
+| seq | bigserial | source of the QW-#### display code |
+| token | string | opaque, unguessable — the public scan URL's path segment |
+| batch_label | string | e.g. "Партия #2 · 12 авг" |
+| status | enum: `free`, `assigned`, `disabled` | |
+| washing_point_id | uuid, nullable | FK -> WashingPoint, unique |
+| assigned_at / disabled_at / replacement_requested_at | timestamp, nullable | |
+| created_at / updated_at | timestamp | |
+
+### QrScan
+One recorded hit of a code's public scan URL — the raw event log behind
+scan-count stats and the "bookings via QR" heuristic
+(`queue.Repository.CountCreatedNearTimes`: any `Queue` row for the code's
+washing point created within 30 minutes of a scan counts as attributed —
+a rough proxy, not real causal tracking, since no scan-to-booking session
+exists yet).
+
+| field | type | notes |
+|---|---|---|
+| id | uuid | PK |
+| qr_code_id | uuid | FK -> QrCode |
+| scanned_at | timestamp | defaults to now() |
+
 ## Entity relationships
 
 ```

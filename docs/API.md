@@ -342,6 +342,37 @@ Validation: 400 `invalid_name` (owners); `invalid_business_name`/
 `invalid_contact_name`/`invalid_contact_phone`/`invalid_address`/
 `invalid_boxes_count`/`invalid_note` (connection requests).
 
+## QR codes — implemented
+
+Three role surfaces on one `/qr-codes*` prefix (`internal/qrcode`): the
+admin pool (generate/list/assign/unassign/disable), a staff-scoped "my
+code" view, and a public, unauthenticated scan endpoint.
+
+| method | path | role | notes |
+|---|---|---|---|
+| POST | `/qr-codes/generate` | admin | body: `{count (1-500), batch_label}`. Returns `{items: [...]}`, newly created `free` codes, sequential `seq` |
+| GET | `/qr-codes` | admin | `{items: [...], stats: {total, free, assigned, disabled}}`. Optional `?status=free\|assigned\|disabled` and `?search=` (matches the QW-#### code or the raw token, case-insensitive) |
+| GET | `/qr-codes/{id}` | admin | detail incl. `stats`; 404 `qr_code_not_found` |
+| POST | `/qr-codes/{id}/assign` | admin | body: `{washing_point_id}`. Frees whatever code the target point already had (one code per point); 409 `qr_code_disabled` if the target code is disabled |
+| POST | `/qr-codes/{id}/unassign` | admin | returns the code to `free` |
+| POST | `/qr-codes/{id}/disable` | admin | terminal — also releases the code from its point if it was assigned; a disabled code can't be reassigned (409 `qr_code_disabled`) |
+| GET | `/qr-codes/mine` | staff | the caller's own washing point's code + `stats`; 400 `no_washing_point` if the account has none (e.g. admin); 404 `qr_code_not_found` if the point has no code assigned yet |
+| POST | `/qr-codes/mine/request-replacement` | staff | 409 `qr_code_not_assigned` unless the caller's code is currently `assigned` |
+| GET | `/qr-codes/scan/{token}` | public, no auth | records a scan, always 200 with an HTML page (dark theme, "open in app" placeholder deep link) — an unknown/disabled token still gets a generic page, never a 404/500, to avoid leaking pool state to whoever is scanning |
+
+Detail/response shape (list items omit `stats`):
+```json
+{
+  "id": "...", "code": "QW-0031", "token": "...", "status": "assigned",
+  "batch_label": "...", "washing_point_id": "...", "washing_point_name": "...",
+  "assigned_at": "...", "disabled_at": null, "replacement_requested_at": null,
+  "created_at": "...",
+  "stats": { "scans_today": 3, "scans_7d": 21, "scans_by_day": [{"date":"2026-09-18","count":3}, ...], "bookings_via_qr": 2 }
+}
+```
+`bookings_via_qr` is a best-effort heuristic (see `docs/DATA_MODEL.md`'s
+`QrScan` entity) — not exact attribution, and 0 for an unassigned code.
+
 ## Conventions
 
 - Errors: `{"error": {"code": "string", "message": "string"}}`, HTTP status matches the error class (400 validation, 401/403 auth, 404 not found, 409 conflict e.g. slot no longer available, 422 business-rule violation).

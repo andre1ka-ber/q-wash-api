@@ -25,6 +25,7 @@ import (
 	"q-wash-api/internal/platform/jwt"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
+	"q-wash-api/internal/qrcode"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/schedule"
 	"q-wash-api/internal/service"
@@ -95,6 +96,10 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	photoManager := photo.NewManager(photoRepo, fileStorage)
 	photoHandler := photo.NewHandler(photoRepo, photoManager, wpRepo)
 
+	qrCodeRepo := qrcode.NewRepository(database)
+	qrCodeManager := qrcode.NewManager(qrCodeRepo, wpRepo, queueRepo)
+	qrCodeHandler := qrcode.NewHandler(qrCodeRepo, qrCodeManager, wpRepo)
+
 	requireAuth := authHandler.Middleware()
 	requireStaff := []func(http.Handler) http.Handler{
 		requireAuth,
@@ -129,6 +134,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	photoHandler.RegisterRoutes(v1, requireStaff...)
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)
 	boxHandler.RegisterRoutes(v1, requireStaff...)
+	qrCodeHandler.RegisterRoutes(v1, requireAdmin, requireStaff)
 
 	v1.Group(func(protected chi.Router) {
 		protected.Use(requireAuth)

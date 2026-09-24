@@ -222,3 +222,47 @@ func (r *Repository) UpdatePausedAt(ctx context.Context, q *Queue) error {
 	}
 	return nil
 }
+
+// CountCreatedNearTimes is a best-effort heuristic for internal/qrcode's
+// "bookings via QR" stat — it has no causal link to an actual scan (no
+// scan-to-booking session exists), it just counts bookings for
+// washingPointID whose CreatedAt landed within window after any one of
+// times. Fetches candidate rows by a coarse time-range query, then
+// matches in Go — the qr_scans event volume this filters against is small
+// (tens to low hundreds of scans per code), so a second SQL round trip or
+// an array-typed query isn't worth the complexity here.
+func (r *Repository) CountCreatedNearTimes(ctx context.Context, washingPointID uuid.UUID, times []time.Time, window time.Duration) (int64, error) {
+	if len(times) == 0 {
+		return 0, nil
+	}
+
+	lo, hi := times[0], times[0].Add(window)
+	for _, t := range times[1:] {
+		if t.Before(lo) {
+			lo = t
+		}
+		if end := t.Add(window); end.After(hi) {
+			hi = end
+		}
+	}
+
+	var rows []struct{ CreatedAt time.Time }
+	err := r.db.WithContext(ctx).Model(&Queue{}).
+		Select("created_at").
+		Where("washing_point_id = ? AND created_at >= ? AND created_at <= ?", washingPointID, lo, hi).
+		Find(&rows).Error
+	if err != nil {
+		return 0, apperror.Internal(err)
+	}
+
+	var count int64
+	for _, row := range rows {
+		for _, t := range times {
+			if !row.CreatedAt.Before(t) && !row.CreatedAt.After(t.Add(window)) {
+				count++
+				break
+			}
+		}
+	}
+	return count, nil
+}
