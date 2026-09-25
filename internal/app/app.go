@@ -135,6 +135,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)
 	boxHandler.RegisterRoutes(v1, requireStaff...)
 	qrCodeHandler.RegisterRoutes(v1, requireAdmin, requireStaff)
+	qrCodeHandler.RegisterShortLinkRoutes(router)
 
 	v1.Group(func(protected chi.Router) {
 		protected.Use(requireAuth)

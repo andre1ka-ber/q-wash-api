@@ -163,6 +163,20 @@ func TestQRCodes_GenerateAssignAndPoolInvariants(t *testing.T) {
 		}
 	})
 
+	t.Run("the short /q/{token} alias serves the same page with no /api/v1 prefix", func(t *testing.T) {
+		resp, err := env.client.Get(env.baseURL + "/q/" + codeAToken)
+		if err != nil {
+			t.Fatalf("short scan request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 for a valid token via /q/, got %d", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("expected text/html, got %q", ct)
+		}
+	})
+
 	t.Run("disabling an assigned code releases the point and it can't be reassigned", func(t *testing.T) {
 		// codeA is currently free (freed when codeB took pointA) — assign
 		// it to pointB first so disabling it actually exercises the

@@ -1631,6 +1631,28 @@ paths:
             text/html:
               schema: { type: string }
 
+  /q/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Meta]
+      operationId: scanQrCodeShort
+      summary: Short alias for GET /api/v1/qr-codes/scan/{token}
+      description: >
+        Same handler as the /api/v1 path, mounted at the root (not under
+        /api/v1) so the URL actually printed on a sticker stays short —
+        a shorter encoded string keeps the rendered QR at a lower,
+        visually cleaner version.
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema: { type: string }
+
   /api/v1/admin/washing-points:
     get:
       tags: [Admin]

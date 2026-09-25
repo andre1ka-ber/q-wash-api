@@ -46,6 +46,18 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin []func(http.Handler)
 	})
 }
 
+// RegisterShortLinkRoutes mounts a short, root-level alias for the scan
+// endpoint (GET /q/{token}, no /api/v1 prefix) — the design mock's own
+// sticker URL shape ("qwash.tj/q/XXXXXX"). A shorter encoded string means
+// a lower-version, visually cleaner QR code, especially at the pool
+// grid's small thumbnail size; RegisterRoutes' /qr-codes/scan/{token}
+// still works too (kept for anything already relying on it), same
+// handler either way. Mount this on the root router returned by
+// httpserver.NewRouter, not the /api/v1 sub-router.
+func (h *Handler) RegisterShortLinkRoutes(r chi.Router) {
+	r.Get("/q/{token}", h.scan)
+}
+
 type statsResponse struct {
 	ScansToday    int64      `json:"scans_today"`
 	Scans7d       int64      `json:"scans_7d"`

@@ -359,6 +359,7 @@ code" view, and a public, unauthenticated scan endpoint.
 | GET | `/qr-codes/mine` | staff | the caller's own washing point's code + `stats`; 400 `no_washing_point` if the account has none (e.g. admin); 404 `qr_code_not_found` if the point has no code assigned yet |
 | POST | `/qr-codes/mine/request-replacement` | staff | 409 `qr_code_not_assigned` unless the caller's code is currently `assigned` |
 | GET | `/qr-codes/scan/{token}` | public, no auth | records a scan, always 200 with an HTML page (dark theme, "open in app" placeholder deep link) — an unknown/disabled token still gets a generic page, never a 404/500, to avoid leaking pool state to whoever is scanning |
+| GET | `/q/{token}` (root, **not** under `/api/v1`) | public, no auth | short alias for the above, same handler — what's actually printed/encoded on a sticker, since a shorter URL keeps the rendered QR at a lower, visually cleaner version |
 
 Detail/response shape (list items omit `stats`):
 ```json
