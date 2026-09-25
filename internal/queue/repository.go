@@ -53,6 +53,25 @@ func (r *Repository) FindActiveBookingsInRange(ctx context.Context, washingPoint
 	return rows, nil
 }
 
+// FindByWashingPointAndRange returns every booking (any status, including
+// canceled) for washingPointID whose scheduled_start_at falls in
+// [rangeStart, rangeEnd) — the reports aggregation's raw input
+// (docs/PLAN_WEB_APPS.md phase 10). Unlike FindActiveBookingsInRange this
+// intentionally doesn't filter by status: the caller needs to tell
+// completed (StatusReady) apart from canceled/still-in-progress itself.
+func (r *Repository) FindByWashingPointAndRange(ctx context.Context, washingPointID uuid.UUID, rangeStart, rangeEnd time.Time) ([]Queue, error) {
+	var rows []Queue
+	err := r.db.WithContext(ctx).
+		Where("washing_point_id = ? AND scheduled_start_at >= ? AND scheduled_start_at < ?",
+			washingPointID, rangeStart, rangeEnd).
+		Order("scheduled_start_at").
+		Find(&rows).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return rows, nil
+}
+
 // CountActiveAhead returns how many other bookings at washingPointID are
 // still active (queue/waiting/washing) and scheduled to start before
 // startAt — the customer-facing "N cars ahead of you" count. Deliberately

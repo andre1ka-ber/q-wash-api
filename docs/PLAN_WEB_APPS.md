@@ -353,6 +353,30 @@ router group.
       approve/reject, and the display board (including its SSE pushes) —
       see `PROGRESS.md`'s 2026-08-31 test-backfill entry for the full
       write-up.
+- [ ] **10 — Reports** (`q-wash-cabinet`'s new "Отчёты" tab, per its own
+      `PLAN.md` — mock: `Car Wash Web Apps.dc.html`'s `tabReports`
+      section): `GET /washing-points/{id}/reports?period=today|week|month`,
+      same `requireStaff` + `OwnsWashingPoint` gate as `board`
+      (`internal/queue`, since it's a `Queue`-driven aggregation, same
+      home as `board`). No new model/migration — everything needed
+      (`Queue.PriceOptionID`/`ServiceID`/`BoxNumber`/`ScheduledStartAt`/
+      `Status`, `Service.PriceOptions`, `Box`) already exists.
+      `StatusReady` = completed/revenue-realized (the terminal
+      "finished" state, same assumption `handler.go:1238` already makes);
+      `today`/`week`(last 7 days)/`month`(month-to-date) bounds in
+      `businessLocation`, same pattern as `dayBounds`. Deltas compare
+      against the immediately-preceding period of equal length (previous
+      day / previous 7 days / previous month-to-date span), computed for
+      real rather than mocked. Box-utilization% is an approximation —
+      booked-minutes ÷ (currently-open-box-count × the point's
+      open/close-hours-per-day × days-in-period) — since box
+      open/closed state isn't tracked historically, only its current
+      value; flagged as a known approximation, not solved further here.
+      No new dependency for export: the mock's PDF/Excel buttons reuse
+      patterns already in this codebase rather than pulling in a PDF/XLSX
+      library — PDF via the same `window.print()` approach
+      `q-wash-cabinet`'s QR code page already uses, Excel via a plain CSV
+      download (opens in Excel, no library needed either).
 
 Each phase should leave the project compiling and `make test` clean, same
 convention as `PLAN.md`. Log actual progress in `PROGRESS.md` as work

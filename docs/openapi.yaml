@@ -707,6 +707,38 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/washing-points/{id}/reports:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: getReports
+      summary: Cabinet "Отчёты" tab's revenue/booking report
+      description: >
+        Requires role staff or admin (docs/PLAN_WEB_APPS.md phase 10).
+        ?period=today|week|month, default today — 400 invalid_period for
+        anything else. today is the calendar day, week the trailing 7
+        calendar days including today, month is month-to-date (the 1st
+        through today), all in the business timezone. Only status=ready
+        bookings count toward revenue/cars/box-utilization. Every
+        *_delta* KPI field is null, not 0, when there's no prior-period
+        data to compare against.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [today, week, month], default: today }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reports" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/services:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -2082,6 +2114,64 @@ components:
         boxes: { type: array, items: { $ref: "#/components/schemas/DisplayBoardBox" } }
         waiting: { type: array, items: { $ref: "#/components/schemas/DisplayBoardWaitingItem" } }
       required: [boxes_active, boxes_total, boxes, waiting]
+
+    Reports:
+      type: object
+      properties:
+        period: { type: string, enum: [today, week, month] }
+        range_label: { type: string, description: "e.g. \"19 – 25 сентября 2026\"" }
+        kpis: { $ref: "#/components/schemas/ReportsKPIs" }
+        bars: { type: array, items: { $ref: "#/components/schemas/ReportsBar" } }
+        services: { type: array, items: { $ref: "#/components/schemas/ReportsServiceRow" } }
+        boxes: { type: array, items: { $ref: "#/components/schemas/ReportsBoxRow" } }
+      required: [period, range_label, kpis, bars, services, boxes]
+
+    ReportsKPIs:
+      type: object
+      properties:
+        revenue_cents: { type: integer }
+        revenue_delta_pct: { type: integer, nullable: true }
+        cars: { type: integer }
+        cars_delta: { type: integer, nullable: true }
+        avg_receipt_cents: { type: integer }
+        avg_receipt_delta_pct: { type: integer, nullable: true }
+        box_utilization_pct: { type: integer, minimum: 0, maximum: 100 }
+        box_utilization_delta_pp: { type: integer, nullable: true }
+      required:
+        [revenue_cents, cars, avg_receipt_cents, box_utilization_pct]
+
+    ReportsBar:
+      type: object
+      description: >
+        One per hour for period=today (always 24, bucket start in the
+        business timezone), one per calendar day otherwise.
+      properties:
+        timestamp: { type: string, format: date-time }
+        revenue_cents: { type: integer }
+        highlighted:
+          type: boolean
+          description: True for the bucket containing "now".
+      required: [timestamp, revenue_cents, highlighted]
+
+    ReportsServiceRow:
+      type: object
+      properties:
+        service_id: { type: string, format: uuid }
+        name: { type: string }
+        count: { type: integer }
+        revenue_cents: { type: integer }
+        share_pct: { type: integer, minimum: 0, maximum: 100 }
+      required: [service_id, name, count, revenue_cents, share_pct]
+
+    ReportsBoxRow:
+      type: object
+      properties:
+        number: { type: integer, minimum: 1 }
+        label: { type: string }
+        cars: { type: integer }
+        revenue_cents: { type: integer }
+        load_pct: { type: integer, minimum: 0, maximum: 100 }
+      required: [number, label, cars, revenue_cents, load_pct]
 
     PaginatedBookings:
       type: object

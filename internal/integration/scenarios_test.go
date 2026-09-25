@@ -1324,6 +1324,168 @@ func TestDisplayBoard_RBACAndTodayScoping(t *testing.T) {
 	})
 }
 
+// TestReports_RBACAndAggregation covers the cabinet "Отчёты" tab's backend
+// (docs/PLAN_WEB_APPS.md phase 10): same RBAC/ownership shape as the
+// display board (requireStaff, IDOR-checked via OwnsWashingPoint), plus a
+// real end-to-end revenue/cars aggregation once a booking reaches
+// StatusReady — everything short of that (queue/waiting/washing, or
+// canceled) must not count.
+func TestReports_RBACAndAggregation(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(140), user.RoleAdmin)
+	staffPhone := uniquePhone(141)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	workerAccess := env.loginAs(t, uniquePhone(142), user.RoleWorker)
+	otherStaffPhone := uniquePhone(143)
+	env.loginAs(t, otherStaffPhone, user.RoleStaff)
+	customerAccess := env.loginAs(t, uniquePhone(144), "")
+
+	// Wide-open hours, same reasoning as todayBookingTime's own doc
+	// comment — keeps this test's "today" bookings inside operating hours
+	// regardless of real time of day.
+	wp := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Reports Point", "address": "1 Reports St", "latitude": 1.0, "longitude": 2.0,
+		"boxes_count": 2, "open_time": "00:00", "close_time": "23:59",
+	})
+	if wp.status != http.StatusCreated {
+		t.Fatalf("create wp: expected 201, got %d (%v)", wp.status, wp.body)
+	}
+	wpID := wp.str("id")
+	env.setWashingPointID(t, staffPhone, wpID)
+	staffAccess := env.reLogin(t, staffPhone)
+
+	otherWP := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Other Reports Point", "address": "2 Reports St", "latitude": 3.0, "longitude": 4.0,
+	})
+	if otherWP.status != http.StatusCreated {
+		t.Fatalf("create other wp: expected 201, got %d (%v)", otherWP.status, otherWP.body)
+	}
+	env.setWashingPointID(t, otherStaffPhone, otherWP.str("id"))
+	otherStaffAccess := env.reLogin(t, otherStaffPhone)
+
+	svc := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/services", adminAccess, map[string]any{
+		"name": "Quick Wash", "duration_minutes": 30,
+		"price_options": []map[string]any{{"name": "Standard", "price_cents": 12800}},
+	})
+	if svc.status != http.StatusCreated {
+		t.Fatalf("create service: expected 201, got %d (%v)", svc.status, svc.body)
+	}
+	priceOptions, _ := svc.body["price_options"].([]any)
+	priceOptionID, _ := priceOptions[0].(map[string]any)["id"].(string)
+	svcID := svc.str("id")
+
+	reportsPath := "/api/v1/washing-points/" + wpID + "/reports?period=today"
+
+	t.Run("unauthenticated cannot reach reports", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, "", nil)
+		if resp.status != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("worker cannot reach reports (requireStaff excludes worker)", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, workerAccess, nil)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("a different point's staff can't see this point's reports (IDOR check)", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, otherStaffAccess, nil)
+		if resp.status != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("invalid period is rejected", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/reports?period=year", staffAccess, nil)
+		if resp.status != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("zero activity before any booking reaches ready", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		kpis, _ := resp.body["kpis"].(map[string]any)
+		if kpis["revenue_cents"] != float64(0) || kpis["cars"] != float64(0) {
+			t.Fatalf("expected zero revenue/cars before any completed booking, got %v", kpis)
+		}
+	})
+
+	carID := env.createCar(t, customerAccess, "Reports Test Car")
+	booking := env.do(t, http.MethodPost, "/api/v1/queue", customerAccess, map[string]any{
+		"car_id": carID, "service_id": svcID, "box_number": 1,
+		"price_option_id": priceOptionID, "scheduled_start_at": todayBookingTime(5),
+	})
+	if booking.status != http.StatusCreated {
+		t.Fatalf("create booking: expected 201, got %d (%v)", booking.status, booking.body)
+	}
+	bookingID := booking.str("id")
+
+	t.Run("still doesn't count while only queued", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, staffAccess, nil)
+		kpis, _ := resp.body["kpis"].(map[string]any)
+		if kpis["cars"] != float64(0) {
+			t.Fatalf("a merely-queued booking shouldn't count yet, got %v", kpis)
+		}
+	})
+
+	for _, status := range []string{"waiting", "washing", "ready"} {
+		if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+bookingID+"/status", staffAccess, map[string]any{"status": status}); r.status != http.StatusOK {
+			t.Fatalf("advance to %s: expected 200, got %d (%v)", status, r.status, r.body)
+		}
+	}
+
+	t.Run("counts once ready, broken down by service and box", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, reportsPath, staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		kpis, _ := resp.body["kpis"].(map[string]any)
+		if kpis["revenue_cents"] != float64(12800) || kpis["cars"] != float64(1) {
+			t.Fatalf("expected revenue_cents=12800 cars=1 once ready, got %v", kpis)
+		}
+		if kpis["avg_receipt_cents"] != float64(12800) {
+			t.Fatalf("expected avg_receipt_cents=12800, got %v", kpis)
+		}
+
+		services, _ := resp.body["services"].([]any)
+		if len(services) != 1 {
+			t.Fatalf("expected exactly 1 service row, got %v", services)
+		}
+		svcRow, _ := services[0].(map[string]any)
+		if svcRow["name"] != "Quick Wash" || svcRow["count"] != float64(1) || svcRow["revenue_cents"] != float64(12800) || svcRow["share_pct"] != float64(100) {
+			t.Fatalf("unexpected service row: %v", svcRow)
+		}
+
+		boxes, _ := resp.body["boxes"].([]any)
+		box1 := findBoxItem(t, boxes, 1)
+		if box1["cars"] != float64(1) || box1["revenue_cents"] != float64(12800) {
+			t.Fatalf("unexpected box 1 row: %v", box1)
+		}
+		box2 := findBoxItem(t, boxes, 2)
+		if box2["cars"] != float64(0) {
+			t.Fatalf("expected box 2 untouched, got %v", box2)
+		}
+
+		bars, _ := resp.body["bars"].([]any)
+		if len(bars) != 24 {
+			t.Fatalf("expected 24 hourly bars for period=today, got %d", len(bars))
+		}
+		var totalBarRevenue float64
+		for _, raw := range bars {
+			bar, _ := raw.(map[string]any)
+			totalBarRevenue += bar["revenue_cents"].(float64)
+		}
+		if totalBarRevenue != 12800 {
+			t.Fatalf("expected bars to sum to 12800, got %v", totalBarRevenue)
+		}
+	})
+}
+
 // sseFrames reads "data: ...\n\n" frames off an open SSE response body,
 // decoding each as JSON and skipping ": ping\n\n" heartbeat comment lines.
 // A read blocks until the request's own context deadline fires, so a

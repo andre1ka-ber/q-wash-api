@@ -100,6 +100,10 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 		brd.With(requireStaff...).Get("/events", h.boardEvents)
 	})
 
+	r.Route("/washing-points/{id}/reports", func(rep chi.Router) {
+		rep.With(requireStaff...).Get("/", h.reports)
+	})
+
 	r.Route("/queue", func(q chi.Router) {
 		q.With(requireStaff...).Get("/", h.list)
 		q.With(requireAuth).Post("/", h.create)

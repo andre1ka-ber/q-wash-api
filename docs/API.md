@@ -208,6 +208,7 @@ everything marked `staff, worker, admin` below and nothing marked plainly
 | GET | `/washing-points/{id}/boxes/live` | staff, worker, admin | the worker app's box-cards screen: each of the point's boxes (see "Boxes" above) joined with whichever booking currently occupies it (`current`, `status=washing`) or, if free, the earliest still-upcoming one assigned to that box number (`next`) — unlike the board above, **not** date-filtered, since "what's happening right now" can span midnight. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/washing-points/{id}/board` | staff, admin | `docs/PLAN_WEB_APPS.md` phase 8 — the lobby-display kiosk's one summary endpoint. **Not** in `requireQueueOps` — `worker` cannot reach this one, only staff/admin (the kiosk logs in as staff/admin, no new role). Boxes joined with today's currently-washing booking (`current`, `nil` = free) plus a flat, `scheduled_start_at`-ordered waiting list (`queue`/`waiting` bookings) across every box for the rest of today — date-filtered same as the queue board above, unlike `boxes/live`. No ticket-number field exists anywhere in the data model (see "Open assumptions" in `PLAN_WEB_APPS.md`); customer identity is `car_name` + `customer_phone_last4`, same convention as the other board endpoints, decided with the user for this endpoint even though it's the one screen visible to a room of other customers. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/washing-points/{id}/board/events` | staff, admin | Phase D (`q-wash-display/PLAN.md`) — `text/event-stream` push variant of the board above, same response shape, same role gate. Pushes an initial snapshot immediately, then again whenever anything changes for this washing point: a booking created/canceled/status-advanced/paused/resumed (reuses the same event-bus publishes `/queue/{id}/events` already relies on), or a box opened/closed via `PATCH /washing-points/{id}/boxes/{boxId}` (a new publish call site added alongside this endpoint — box open/close never published before). A `: ping` comment is sent every 25s, same as `/queue/{id}/events`. Native browser `EventSource` cannot attach the `Authorization` header this route requires, same as every other route — a web client needs a `fetch()` + stream reader instead (see `q-wash-shared`). |
+| GET | `/washing-points/{id}/reports` | staff, admin | `docs/PLAN_WEB_APPS.md` phase 10 — the cabinet "Отчёты" tab. `?period=today\|week\|month` (default `today`; 400 `invalid_period` for anything else). `today` is the calendar day, `week` the trailing 7 calendar days including today, `month` is month-to-date (the 1st through today, not a full calendar month) — all in the business timezone. Revenue/cars/avg-receipt/box-utilization, each compared against the immediately-preceding period of the same length (`*_delta_pct`/`_delta`/`_delta_pp`, `null` when there's no prior-period data to compare against, e.g. a brand-new point). Only `status = ready` bookings count as revenue — `queue`/`waiting`/`washing`/`canceled` bookings in the period are invisible to this endpoint. Box-utilization is booked-minutes ÷ (currently-open box count × the point's open/close hours × days in the period) — an approximation, since box open/closed state isn't tracked historically, only its current value. Scoped to the caller's own washing point — 404 `washing_point_not_found` for another point. |
 | GET | `/me/queue` | any authenticated | paginated (`?page=&page_size=`, see Conventions below), all statuses, most-recently-scheduled first. Only the caller's own bookings — no role can see another user's history through this endpoint. |
 
 Create validation errors (400 unless noted): `invalid_car_id`/`invalid_service_id`/`invalid_price_option_id` (uuid parse), `invalid_box_number` (outside `1..boxes_count`), `invalid_scheduled_start_at` (not RFC3339, or not in the future), `invalid_notes` (>2000 chars), `service_inactive`/`washing_point_inactive`, `invalid_price_option` (doesn't belong to the service), `outside_operating_hours` (as of phase 5, checked against the requested date's resolved per-weekday schedule window — see "Per-weekday schedule" above — not the legacy flat columns; a closed day or a request straddling a break both hit this code), 404 `car_not_found` (not owned or doesn't exist) / `service_not_found` / `washing_point_not_found`, 409 `slot_unavailable` (the requested box isn't free for some instant in the requested interval) / `box_closed` (the requested box exists and is closed, see "Boxes" above) / `active_booking_exists` (the caller already has a `queue`/`waiting`/`washing` booking, at this or any other washing point).
@@ -285,6 +286,40 @@ active), `boxes_total` is every box regardless of open/closed state.
 a flat, cross-box list, unlike `boxes/live`'s per-box `next`. No average
 wait time — nothing in the API computes one (deferred, see
 `PLAN_WEB_APPS.md`'s "Open assumptions").
+
+Reports response (`GET /washing-points/{id}/reports?period=week`):
+```json
+{
+  "period": "week", "range_label": "19 – 25 сентября 2026",
+  "kpis": {
+    "revenue_cents": 1234500, "revenue_delta_pct": 12,
+    "cars": 87, "cars_delta": 9,
+    "avg_receipt_cents": 14189, "avg_receipt_delta_pct": 2,
+    "box_utilization_pct": 68, "box_utilization_delta_pp": -1
+  },
+  "bars": [
+    {"timestamp": "2026-09-19T00:00:00+05:00", "revenue_cents": 145000, "highlighted": false},
+    {"timestamp": "2026-09-25T00:00:00+05:00", "revenue_cents": 198000, "highlighted": true}
+  ],
+  "services": [
+    {"service_id": "...", "name": "Ароматическая мойка", "count": 12, "revenue_cents": 153600, "share_pct": 18}
+  ],
+  "boxes": [
+    {"number": 1, "label": "Бокс 1", "cars": 34, "revenue_cents": 462000, "load_pct": 78}
+  ]
+}
+```
+Every `*_delta*` field is `null`, not `0`, when the immediately-preceding
+period of the same length has no data to compare against — a real "no
+signal yet", not a misleading flat 0%. `bars` is one entry per hour for
+`period=today` (bounded to the point's open/close hours' actual clock
+range, but always 24 entries — hours outside it are just `0`) or one per
+calendar day otherwise; `timestamp` is each bucket's start, RFC3339 in the
+business timezone — the frontend formats its own hour/weekday/day-of-month
+label from it, same convention `q-wash-cabinet`'s QR code page already
+uses for `scans_by_day`. `services`/`boxes` are sorted by
+`revenue_cents` descending / by box `number` respectively, and only
+include `status = ready` bookings.
 
 ## Admin — implemented (`docs/PLAN_WEB_APPS.md` phase 3)
 
