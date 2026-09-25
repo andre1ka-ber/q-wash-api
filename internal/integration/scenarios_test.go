@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"q-wash-api/internal/queue"
 	"q-wash-api/internal/user"
 )
 
@@ -1482,6 +1485,182 @@ func TestReports_RBACAndAggregation(t *testing.T) {
 		}
 		if totalBarRevenue != 12800 {
 			t.Fatalf("expected bars to sum to 12800, got %v", totalBarRevenue)
+		}
+	})
+}
+
+// TestReports_DeltasAndMonthPeriod closes two gaps TestReports_RBACAndAggregation
+// left open: it never exercised a real (non-null) delta — its bookings were
+// all "current period", so every *_delta* field only ever hit the
+// no-prior-data nil branch — and it never hit period=month at all. There's
+// no way to seed a completed booking in the past through the public API
+// (POST /queue requires a future scheduled_start_at), so the "previous
+// period" row is inserted directly via env.db — same shortcut
+// setWashingPointID/promoteToRole already use for setup the API itself
+// doesn't expose.
+func TestReports_DeltasAndMonthPeriod(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(150), user.RoleAdmin)
+	staffPhone := uniquePhone(151)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	customerAccess := env.loginAs(t, uniquePhone(152), "")
+	customer2Access := env.loginAs(t, uniquePhone(153), "")
+
+	wp := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+		"name": "Deltas Point", "address": "1 Deltas St", "latitude": 1.0, "longitude": 2.0,
+		"boxes_count": 1, "open_time": "00:00", "close_time": "23:59",
+	})
+	if wp.status != http.StatusCreated {
+		t.Fatalf("create wp: expected 201, got %d (%v)", wp.status, wp.body)
+	}
+	wpID := wp.str("id")
+	env.setWashingPointID(t, staffPhone, wpID)
+	staffAccess := env.reLogin(t, staffPhone)
+
+	svc := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/services", adminAccess, map[string]any{
+		"name": "Quick Wash", "duration_minutes": 30,
+		"price_options": []map[string]any{{"name": "Standard", "price_cents": 10000}},
+	})
+	if svc.status != http.StatusCreated {
+		t.Fatalf("create service: expected 201, got %d (%v)", svc.status, svc.body)
+	}
+	priceOptions, _ := svc.body["price_options"].([]any)
+	priceOptionID, _ := priceOptions[0].(map[string]any)["id"].(string)
+	svcID := svc.str("id")
+
+	// Seed the "previous week" with one completed 10000-cent booking,
+	// inserted directly since the API can't create a past booking. 9 days
+	// ago safely lands in [today-13d, today-6d) — period=week's previous
+	// period — regardless of what time of day this test happens to run.
+	var pastUser user.User
+	if err := env.db.Where("phone_number = ?", uniquePhone(152)).First(&pastUser).Error; err != nil {
+		t.Fatalf("find customer user: %v", err)
+	}
+	pastCarID := env.createCar(t, customerAccess, "Past Car")
+	pastCarUUID, err := uuid.Parse(pastCarID)
+	if err != nil {
+		t.Fatalf("parse car id: %v", err)
+	}
+	svcUUID, _ := uuid.Parse(svcID)
+	priceUUID, _ := uuid.Parse(priceOptionID)
+	wpUUID, _ := uuid.Parse(wpID)
+	pastStart := time.Now().Add(-9 * 24 * time.Hour)
+	pastRow := queue.Queue{
+		Status:           queue.StatusReady,
+		UserID:           pastUser.ID,
+		CarID:            pastCarUUID,
+		ServiceID:        svcUUID,
+		PriceOptionID:    priceUUID,
+		WashingPointID:   wpUUID,
+		BoxNumber:        1,
+		ScheduledStartAt: pastStart,
+		ScheduledEndAt:   pastStart.Add(30 * time.Minute),
+	}
+	if err := env.db.Create(&pastRow).Error; err != nil {
+		t.Fatalf("insert past booking: %v", err)
+	}
+
+	// Two "current period" bookings today, 20000 cents each, from two
+	// different customers (queue_one_active_booking_per_user forbids the
+	// same customer holding two active bookings at once) and spaced far
+	// enough apart in the one box that they don't overlap.
+	svc2 := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/services", adminAccess, map[string]any{
+		"name": "Full Wash", "duration_minutes": 30,
+		"price_options": []map[string]any{{"name": "Standard", "price_cents": 20000}},
+	})
+	if svc2.status != http.StatusCreated {
+		t.Fatalf("create service 2: expected 201, got %d (%v)", svc2.status, svc2.body)
+	}
+	priceOptions2, _ := svc2.body["price_options"].([]any)
+	priceOptionID2, _ := priceOptions2[0].(map[string]any)["id"].(string)
+	svcID2 := svc2.str("id")
+
+	car1ID := env.createCar(t, customerAccess, "Current Car 1")
+	car2ID := env.createCar(t, customer2Access, "Current Car 2")
+	booking1 := env.do(t, http.MethodPost, "/api/v1/queue", customerAccess, map[string]any{
+		"car_id": car1ID, "service_id": svcID2, "box_number": 1,
+		"price_option_id": priceOptionID2, "scheduled_start_at": todayBookingTime(5),
+	})
+	if booking1.status != http.StatusCreated {
+		t.Fatalf("create booking 1: expected 201, got %d (%v)", booking1.status, booking1.body)
+	}
+	booking2 := env.do(t, http.MethodPost, "/api/v1/queue", customer2Access, map[string]any{
+		"car_id": car2ID, "service_id": svcID2, "box_number": 1,
+		"price_option_id": priceOptionID2, "scheduled_start_at": todayBookingTime(60),
+	})
+	if booking2.status != http.StatusCreated {
+		t.Fatalf("create booking 2: expected 201, got %d (%v)", booking2.status, booking2.body)
+	}
+
+	for _, bookingID := range []string{booking1.str("id"), booking2.str("id")} {
+		for _, status := range []string{"waiting", "washing", "ready"} {
+			if r := env.do(t, http.MethodPatch, "/api/v1/queue/"+bookingID+"/status", staffAccess, map[string]any{"status": status}); r.status != http.StatusOK {
+				t.Fatalf("advance %s to %s: expected 200, got %d (%v)", bookingID, status, r.status, r.body)
+			}
+		}
+	}
+
+	t.Run("week: real deltas against real previous-period data", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/reports?period=week", staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		kpis, _ := resp.body["kpis"].(map[string]any)
+
+		// current: 2 cars, 40000 revenue, 20000 avg. previous: 1 car, 10000
+		// revenue, 10000 avg. revenue_delta_pct = (40000-10000)/10000*100 = 300.
+		// cars_delta = 2-1 = 1. avg_receipt_delta_pct = (20000-10000)/10000*100 = 100.
+		if kpis["revenue_cents"] != float64(40000) || kpis["cars"] != float64(2) || kpis["avg_receipt_cents"] != float64(20000) {
+			t.Fatalf("unexpected current-period kpis: %v", kpis)
+		}
+		if kpis["revenue_delta_pct"] != float64(300) {
+			t.Fatalf("expected revenue_delta_pct=300 (real, non-null), got %v", kpis["revenue_delta_pct"])
+		}
+		if kpis["cars_delta"] != float64(1) {
+			t.Fatalf("expected cars_delta=1 (real, non-null), got %v", kpis["cars_delta"])
+		}
+		if kpis["avg_receipt_delta_pct"] != float64(100) {
+			t.Fatalf("expected avg_receipt_delta_pct=100 (real, non-null), got %v", kpis["avg_receipt_delta_pct"])
+		}
+		// The previous period had real booked minutes too (not zero), so
+		// this must be a real number, not the "no prior data" nil.
+		if kpis["box_utilization_delta_pp"] == nil {
+			t.Fatalf("expected a real (non-nil) box_utilization_delta_pp, got nil: %v", kpis)
+		}
+	})
+
+	t.Run("month: month-to-date includes today's bookings", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/reports?period=month", staffAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		if resp.body["period"] != "month" {
+			t.Fatalf("expected period=month, got %v", resp.body["period"])
+		}
+		rangeLabel, _ := resp.body["range_label"].(string)
+		if !strings.HasPrefix(rangeLabel, "1 ") && !strings.Contains(rangeLabel, "1 –") {
+			t.Fatalf("expected month range_label to start from the 1st of the month, got %q", rangeLabel)
+		}
+		kpis, _ := resp.body["kpis"].(map[string]any)
+		// >= rather than == : whether the "9 days ago" previous-period
+		// fixture also falls inside month-to-date depends on which day of
+		// the real calendar month this test happens to run on (it does
+		// once the month is at least 10 days in) — only today's 2
+		// bookings are guaranteed present regardless of run date.
+		if cars, _ := kpis["cars"].(float64); cars < 2 {
+			t.Fatalf("expected at least today's 2 bookings in month-to-date, got %v", kpis)
+		}
+		if revenue, _ := kpis["revenue_cents"].(float64); revenue < 40000 {
+			t.Fatalf("expected at least today's 40000 cents in month-to-date, got %v", kpis)
+		}
+		bars, _ := resp.body["bars"].([]any)
+		wantDays := int(time.Now().Day())
+		if len(bars) != wantDays {
+			t.Fatalf("expected %d daily bars (1st through today), got %d", wantDays, len(bars))
+		}
+		last, _ := bars[len(bars)-1].(map[string]any)
+		if last["highlighted"] != true {
+			t.Fatalf("expected the last (today's) bar to be highlighted, got %v", last)
 		}
 	})
 }
