@@ -350,6 +350,28 @@ are always forced to their own point regardless of the query param.
 
 Validation: 400 `invalid_user_id`/`invalid_queue_id` (uuid parse), `invalid_text` (empty or >2000 chars), `invalid_send_at` (not RFC3339), `queue_user_mismatch` (`queue_id` doesn't belong to `user_id`); 404 `user_not_found`/`queue_not_found`.
 
+### Push notifications for booking stages — implemented
+
+The customer app receives a Firebase Cloud Messaging push at each stage of a booking. The app registers its FCM token; the API sends to every token the booking's owner has registered.
+
+| method | path | role | notes |
+|---|---|---|---|
+| PUT | `/me/devices` | any authenticated | body `{token, platform}` (`platform`: `android`\|`ios`). Idempotent upsert: a token already registered (same phone again, or another account signing in on it) is moved to the caller. 204. 400 `invalid_token` (blank / >4096 chars), `invalid_platform`. |
+| DELETE | `/me/devices/{token}` | any authenticated | Removes the caller's own token (call on logout). 204 even if unknown or not the caller's (idempotent; never removes someone else's). |
+
+Stages (each sent **at most once per booking**, recorded in `notifications` with `channel: "push"`):
+
+| kind | when | text (Russian) |
+|---|---|---|
+| `reminder_1h` | from 1 hour before `scheduled_start_at` until the start, while the booking is `queue`/`waiting`; skipped if the booking was created less than 1 hour before its start | «Скоро мойка — Через час · 14:00, <точка>» |
+| `late_5m` | from 5 minutes after the scheduled start (up to 2 hours after), while still `queue`/`waiting` | «Вас ждут — … подъезжайте к боксу N» |
+| `started` | the moment the booking's status becomes `washing` | «Мойка началась» |
+| `finished` | the moment the status becomes `ready` | «Машина готова — Можно забирать» |
+
+Push payload `data`: `{"type": "booking_stage", "kind": "<kind>", "queue_id": "<uuid>"}`. Times in the text are Asia/Dushanbe. A cancel/no-show/started booking is never sent `reminder_1h`/`late_5m`. A customer with no registered device (e.g. a walk-in created by staff) is skipped silently. Delivery is best-effort and never fails the status change; tokens FCM reports as unregistered are deleted. `started`/`finished` are sent from `PATCH /queue/{id}/status` in the background; `reminder_1h`/`late_5m` come from an in-process scheduler (`internal/notification.Scheduler`, ticks every minute; the unique `(queue_id, kind)` index stops several API instances double-sending).
+
+Configuration: `FCM_PROJECT_ID` and either `FCM_SERVICE_ACCOUNT_FILE` (path) or `FCM_SERVICE_ACCOUNT_JSON` (inline) — when unset, push is disabled and a no-op sender only logs. Never commit the key.
+
 ## Owners & connection requests — implemented (`docs/PLAN_WEB_APPS.md` phase 2)
 
 Both admin-only (not staff) — this is the network-wide admin app's surface;

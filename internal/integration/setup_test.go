@@ -37,6 +37,7 @@ import (
 
 	"q-wash-api/internal/app"
 	"q-wash-api/internal/config"
+	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/storage"
 	"q-wash-api/internal/user"
 )
@@ -47,6 +48,59 @@ import (
 type spySender struct {
 	mu       sync.Mutex
 	messages []sentMessage
+}
+
+// spyPush records push notifications instead of contacting FCM, and lets a
+// test mark tokens as dead.
+type spyPush struct {
+	mu           sync.Mutex
+	sent         []sentPush
+	unregistered map[string]bool
+}
+
+type sentPush struct {
+	Token string
+	Msg   push.Message
+}
+
+func (s *spyPush) Send(_ context.Context, token string, msg push.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unregistered[token] {
+		return push.ErrUnregistered
+	}
+	s.sent = append(s.sent, sentPush{Token: token, Msg: msg})
+	return nil
+}
+
+func (s *spyPush) markUnregistered(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unregistered == nil {
+		s.unregistered = map[string]bool{}
+	}
+	s.unregistered[token] = true
+}
+
+func (s *spyPush) snapshot() []sentPush {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sentPush(nil), s.sent...)
+}
+
+// waitForPush polls until at least n pushes have been recorded — status-change
+// notifications are sent in the background.
+func (s *spyPush) waitForPush(t *testing.T, n int) []sentPush {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := s.snapshot(); len(got) >= n {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected %d push notification(s), got %d: %+v", n, len(s.snapshot()), s.snapshot())
+	return nil
 }
 
 type sentMessage struct {
@@ -90,7 +144,9 @@ type testEnv struct {
 	baseURL string
 	client  *http.Client
 	sms     *spySender
+	push    *spyPush
 	db      *gorm.DB
+	cfg     config.Config
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -157,10 +213,11 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	sender := &spySender{}
-	server := httptest.NewServer(app.New(database, cfg, sender, fileStorage))
+	pushSpy := &spyPush{}
+	server := httptest.NewServer(app.New(database, cfg, sender, pushSpy, fileStorage))
 	t.Cleanup(server.Close)
 
-	return &testEnv{baseURL: server.URL, client: server.Client(), sms: sender, db: database}
+	return &testEnv{baseURL: server.URL, client: server.Client(), sms: sender, push: pushSpy, db: database, cfg: cfg}
 }
 
 // promoteToRole directly updates a user's role in the DB. There is no API

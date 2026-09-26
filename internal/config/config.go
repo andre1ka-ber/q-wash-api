@@ -15,6 +15,7 @@ type Config struct {
 	DB      DBConfig
 	Auth    AuthConfig
 	Storage StorageConfig
+	Push    PushConfig
 }
 
 type HTTPConfig struct {
@@ -66,6 +67,15 @@ type StorageConfig struct {
 	BaseURL string
 }
 
+// PushConfig configures Firebase Cloud Messaging. Both fields empty means
+// push is disabled (a no-op sender is used). The service-account key comes
+// either inline (FCM_SERVICE_ACCOUNT_JSON) or from a file
+// (FCM_SERVICE_ACCOUNT_FILE) — never commit it.
+type PushConfig struct {
+	ProjectID          string
+	ServiceAccountJSON []byte
+}
+
 func Load() (Config, error) {
 	cfg := Config{
 		Env: getEnv("APP_ENV", "development"),
@@ -89,9 +99,17 @@ func Load() (Config, error) {
 			Dir:     getEnv("UPLOADS_DIR", "./uploads"),
 			BaseURL: getEnv("UPLOADS_BASE_URL", "/uploads"),
 		},
+		Push: PushConfig{ProjectID: getEnv("FCM_PROJECT_ID", "")},
 	}
 
 	var err error
+	if inline := getEnv("FCM_SERVICE_ACCOUNT_JSON", ""); inline != "" {
+		cfg.Push.ServiceAccountJSON = []byte(inline)
+	} else if path := getEnv("FCM_SERVICE_ACCOUNT_FILE", ""); path != "" {
+		if cfg.Push.ServiceAccountJSON, err = os.ReadFile(path); err != nil {
+			return Config{}, fmt.Errorf("read FCM_SERVICE_ACCOUNT_FILE: %w", err)
+		}
+	}
 	if cfg.Auth.AccessTokenTTL, err = getDuration("JWT_ACCESS_TTL", 15*time.Minute); err != nil {
 		return Config{}, err
 	}

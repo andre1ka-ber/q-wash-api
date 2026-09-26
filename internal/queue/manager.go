@@ -33,7 +33,20 @@ type Manager struct {
 	scheduleRepo *schedule.Repository
 	boxRepo      *box.Repository
 	bus          *eventbus.Bus
+	notifier     StageNotifier
 }
+
+// StageNotifier is told after a booking's status changes so the customer can
+// be notified (started/finished). It's an interface, set after construction,
+// because the notification package depends on queue, not the other way round.
+// Implementations must not block or fail the status change.
+type StageNotifier interface {
+	NotifyStatus(ctx context.Context, q *Queue)
+}
+
+// SetStageNotifier wires the optional notifier; without one, status changes
+// notify nobody.
+func (m *Manager) SetStageNotifier(n StageNotifier) { m.notifier = n }
 
 func NewManager(db *gorm.DB, repo *Repository, carRepo *car.Repository, serviceRepo *service.Repository, wpRepo *washingpoint.Repository, scheduleRepo *schedule.Repository, boxRepo *box.Repository, bus *eventbus.Bus) *Manager {
 	return &Manager{db: db, repo: repo, carRepo: carRepo, serviceRepo: serviceRepo, wpRepo: wpRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
@@ -403,5 +416,8 @@ func (m *Manager) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus Stat
 		return nil, err
 	}
 	m.bus.Publish(q.WashingPointID)
+	if m.notifier != nil {
+		m.notifier.NotifyStatus(ctx, q)
+	}
 	return q, nil
 }

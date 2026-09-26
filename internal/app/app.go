@@ -7,6 +7,7 @@ package app
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
@@ -17,12 +18,14 @@ import (
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/connectionrequest"
+	"q-wash-api/internal/device"
 	"q-wash-api/internal/notification"
 	"q-wash-api/internal/owner"
 	"q-wash-api/internal/photo"
 	"q-wash-api/internal/platform/eventbus"
 	"q-wash-api/internal/platform/httpserver"
 	"q-wash-api/internal/platform/jwt"
+	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
 	"q-wash-api/internal/qrcode"
@@ -41,7 +44,7 @@ import (
 // smsSender and fileStorage are injected (rather than constructed
 // internally) so tests can pass a spy sender / a temp-dir-backed storage
 // instead of the stdout stub / uploads dir cmd/api uses in dev.
-func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage storage.Storage) http.Handler {
+func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender push.Sender, fileStorage storage.Storage) http.Handler {
 	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins)
 	httpserver.MountStatic(router, cfg.Storage.BaseURL, cfg.Storage.Dir)
 
@@ -79,9 +82,13 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, boxRepo, queueBus)
 	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, boxRepo, queueBus)
 
+	deviceRepo := device.NewRepository(database)
+	deviceHandler := device.NewHandler(deviceRepo)
+
 	notificationRepo := notification.NewRepository(database)
-	notificationManager := notification.NewManager(notificationRepo, userRepo, queueRepo, smsSender)
+	notificationManager := notification.NewManager(notificationRepo, userRepo, queueRepo, deviceRepo, wpRepo, smsSender, pushSender)
 	notificationHandler := notification.NewHandler(notificationRepo, notificationManager)
+	queueManager.SetStageNotifier(notificationManager)
 
 	ownerRepo := owner.NewRepository(database)
 	ownerHandler := owner.NewHandler(ownerRepo)
@@ -142,7 +149,26 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, fileStorage
 		authHandler.RegisterAuthenticatedRoutes(protected)
 		userHandler.RegisterRoutes(protected)
 		carHandler.RegisterRoutes(protected)
+		deviceHandler.RegisterRoutes(protected)
 	})
 
 	return router
+}
+
+// NewNotificationScheduler builds the background job that sends the
+// time-based booking notifications (1h reminder, 5-minute late nudge). It is
+// separate from New because it runs alongside the HTTP server, not inside a
+// request; cmd/api starts it, tests call Tick directly.
+func NewNotificationScheduler(database *gorm.DB, smsSender sms.Sender, pushSender push.Sender, interval time.Duration) *notification.Scheduler {
+	notificationRepo := notification.NewRepository(database)
+	manager := notification.NewManager(
+		notificationRepo,
+		user.NewRepository(database),
+		queue.NewRepository(database),
+		device.NewRepository(database),
+		washingpoint.NewRepository(database),
+		smsSender,
+		pushSender,
+	)
+	return notification.NewScheduler(notificationRepo, manager, interval)
 }

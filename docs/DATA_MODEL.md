@@ -276,13 +276,26 @@ A user may have at most one active (`queue`/`waiting`/`washing`) booking at a ti
 | user_id | uuid | FK -> User |
 | queue_id | uuid, nullable | FK -> Queue, when the notification relates to a booking |
 | status | enum: `pending`, `sent`, `failed` | |
-| channel | enum: `sms` | only channel for now; extensible |
+| channel | enum: `sms`, `push` | `push` = FCM booking-stage notifications |
+| kind | string, nullable | booking-stage notifications only: `reminder_1h`, `late_5m`, `started`, `finished`; unique per `(queue_id, kind)` so a stage is sent once |
 | text | string | |
 | send_at | timestamp | when it should be sent |
 | sent_at | timestamp, nullable | |
 | created_at | timestamp | |
 
 > Added `user_id`, `queue_id`, `channel` beyond the original spec's four fields — needed to know who/what a notification is for and how to deliver it. Implemented in Phase 10 (`internal/notification`): `POST /notifications` (staff/admin) sends immediately through the same `sms.Sender` stub OTP uses, *if* `send_at` is due (now or past) — `status` becomes `sent`/`failed` and `sent_at` is set. A `send_at` in the future just creates the row as `pending` and leaves it there: there is still no background worker in this MVP to sweep due notifications and send them later, so a scheduled reminder never actually fires on its own yet (flagged as future work, see PLAN.md Phase 12). `GET /me/notifications` (any authenticated user, own records, paginated) is the read side.
+
+> Push (migration 000024): booking-stage notifications go out over FCM (`channel: push`, with a `kind`); the time-based ones (`reminder_1h`, `late_5m`) are sent by an in-process scheduler (`notification.Scheduler`), which this note's "no background worker" no longer applies to — but manually created future-dated notifications (`POST /notifications` with a future `send_at`) are still not swept.
+
+### DeviceToken (`device_tokens`)
+
+| field | type | notes |
+|---|---|---|
+| id | uuid | PK |
+| user_id | uuid | FK -> User (cascade) |
+| token | text | FCM registration token, unique — one row per installed app; re-registering under another account moves it |
+| platform | enum: `android`, `ios` | |
+| created_at, updated_at | timestamp | |
 
 ### QrCode
 A physical sticker in the admin's QR-code pool, generated ahead of

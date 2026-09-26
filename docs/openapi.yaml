@@ -1324,6 +1324,48 @@ paths:
               schema: { $ref: "#/components/schemas/PaginatedBookings" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/me/devices:
+    put:
+      tags: [Notifications]
+      operationId: registerDevice
+      summary: Register (or move) the caller's push token
+      description: >
+        Idempotent upsert of an FCM device token. A token already registered
+        by another account is moved to the caller. Booking-stage push
+        notifications (reminder_1h, late_5m, started, finished) are sent to
+        every registered token of the booking's owner.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string, maxLength: 4096 }
+                platform: { type: string, enum: [android, ios] }
+              required: [token, platform]
+      responses:
+        "204": { description: Registered }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/me/devices/{token}:
+    delete:
+      tags: [Notifications]
+      operationId: unregisterDevice
+      summary: Remove the caller's push token (on logout)
+      description: Idempotent; never removes another account's token.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Removed (or was not registered) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/v1/me/notifications:
     get:
       tags: [Notifications]
@@ -2343,7 +2385,7 @@ components:
         user_id: { type: string, format: uuid }
         queue_id: { type: string, format: uuid, nullable: true }
         status: { type: string, enum: [pending, sent, failed] }
-        channel: { type: string, enum: [sms] }
+        channel: { type: string, enum: [sms, push] }
         text: { type: string }
         send_at: { type: string, format: date-time }
         sent_at: { type: string, format: date-time, nullable: true }

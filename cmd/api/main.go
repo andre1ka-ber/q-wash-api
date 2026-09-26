@@ -15,6 +15,7 @@ import (
 	"q-wash-api/internal/app"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/db"
+	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
 )
@@ -56,7 +57,12 @@ func run() error {
 		return err
 	}
 
-	handler := app.New(database, cfg, sms.NewStubSender(), fileStorage)
+	pushSender, err := push.New(context.Background(), cfg.Push.ProjectID, cfg.Push.ServiceAccountJSON)
+	if err != nil {
+		return err
+	}
+
+	handler := app.New(database, cfg, sms.NewStubSender(), pushSender, fileStorage)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,
@@ -68,6 +74,8 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go app.NewNotificationScheduler(database, sms.NewStubSender(), pushSender, time.Minute).Run(ctx)
 
 	serveErr := make(chan error, 1)
 	go func() {
