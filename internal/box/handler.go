@@ -69,9 +69,8 @@ type createRequest struct {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	washingPointID, err := httputil.ParseUUIDParam(r, "id")
@@ -109,9 +108,8 @@ type updateRequest struct {
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	b, err := h.findOwned(r, authUser)
@@ -152,9 +150,8 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	b, err := h.findOwned(r, authUser)

@@ -9,7 +9,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 )
 
 type Handler struct {
@@ -54,9 +53,8 @@ func toResponse(u *User) response {
 }
 
 func (h *Handler) getMe(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -73,9 +71,8 @@ type updateMeRequest struct {
 }
 
 func (h *Handler) updateMe(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 

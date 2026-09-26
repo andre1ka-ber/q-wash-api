@@ -17,6 +17,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/owner"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/service"
 	"q-wash-api/internal/washingpoint"
@@ -129,9 +130,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().In(queue.BusinessLocation())
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, queue.BusinessLocation())
-	dayEnd := dayStart.Add(24 * time.Hour)
+	dayStart, dayEnd := clock.DayBounds(time.Now())
 
 	bookings, err := h.queueRepo.FindScheduledInRangeNetworkWide(r.Context(), dayStart, dayEnd)
 	if err != nil {

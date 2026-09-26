@@ -11,6 +11,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/device"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/platform/sms"
@@ -111,14 +112,10 @@ func (m *Manager) attemptSend(ctx context.Context, phoneNumber string, n *Notifi
 	n.SentAt = &now
 }
 
-// businessLocation is the fixed platform timezone (see queue's identical
-// constant): times in notification text are Asia/Dushanbe.
-var businessLocation = time.FixedZone("Asia/Dushanbe", 5*60*60)
-
 func stageMessage(kind Kind, pointName string, boxNumber int, start time.Time) push.Message {
 	switch kind {
 	case KindReminder:
-		return push.Message{Title: "Скоро мойка", Body: fmt.Sprintf("Через час · %s, %s", start.In(businessLocation).Format("15:04"), pointName)}
+		return push.Message{Title: "Скоро мойка", Body: fmt.Sprintf("Через час · %s, %s", start.In(clock.BusinessLocation).Format("15:04"), pointName)}
 	case KindLate:
 		return push.Message{Title: "Вас ждут", Body: fmt.Sprintf("Время записи уже началось — подъезжайте к боксу %d · %s", boxNumber, pointName)}
 	case KindStarted:

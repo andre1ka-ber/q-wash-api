@@ -136,9 +136,8 @@ type createRequest struct {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -232,9 +231,8 @@ type updateRequest struct {
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -301,9 +299,8 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deactivate(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -329,9 +326,8 @@ func (h *Handler) deactivate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) addPriceOption(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -381,9 +377,8 @@ type updatePriceOptionRequest struct {
 }
 
 func (h *Handler) updatePriceOption(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -426,9 +421,8 @@ func (h *Handler) updatePriceOption(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deletePriceOption(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 

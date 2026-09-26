@@ -4,11 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"q-wash-api/internal/platform/clock"
+
 	"github.com/google/uuid"
 )
 
 func businessDay(y int, m time.Month, d, hour, minute int) time.Time {
-	return time.Date(y, m, d, hour, minute, 0, 0, businessLocation)
+	return time.Date(y, m, d, hour, minute, 0, 0, clock.BusinessLocation)
 }
 
 func TestPeriodBounds(t *testing.T) {

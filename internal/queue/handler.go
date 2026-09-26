@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	_ "time/tzdata" // embed the IANA database so LoadLocation works regardless of the host's zoneinfo files
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -16,33 +15,13 @@ import (
 	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/platform/eventbus"
-	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/schedule"
 	"q-wash-api/internal/service"
 	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
 )
-
-// businessLocation is the fixed timezone washing-point open_time/close_time
-// "HH:MM" strings are interpreted in. Washing points have no per-point
-// timezone field yet (single-market deployment — see docs/DATA_MODEL.md);
-// this app currently only serves Tajikistan (+992 numbers), which has one
-// fixed UTC+5 offset with no DST, so a single constant is correct today.
-var businessLocation = func() *time.Location {
-	loc, err := time.LoadLocation("Asia/Dushanbe")
-	if err != nil {
-		panic("businessLocation: failed to load Asia/Dushanbe: " + err.Error())
-	}
-	return loc
-}()
-
-// BusinessLocation exposes businessLocation to other packages (currently
-// internal/admin's today-aggregates) that need the same fixed timezone
-// without duplicating the constant.
-func BusinessLocation() *time.Location {
-	return businessLocation
-}
 
 type Handler struct {
 	repo         *Repository
@@ -163,7 +142,7 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	weekday := weekdayIndex(day.In(businessLocation))
+	weekday := weekdayIndex(day.In(clock.BusinessLocation))
 	scheduleRow, err := h.scheduleRepo.FindByWeekday(r.Context(), washingPointID, weekday)
 	if err != nil {
 		httputil.WriteError(w, r, err)
@@ -220,17 +199,17 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 }
 
 // combineDayAndTime combines a calendar day with an "HH:MM" time-of-day
-// string (as stored on WashingPoint) into an instant in businessLocation —
+// string (as stored on WashingPoint) into an instant in clock.BusinessLocation —
 // e.g. "08:00" means 08:00 Asia/Dushanbe local time, not 08:00 UTC. The day
-// is first converted into businessLocation before its Y/M/D are read, so a
+// is first converted into clock.BusinessLocation before its Y/M/D are read, so a
 // UTC instant near local midnight still resolves to the intended local day.
 func combineDayAndTime(day time.Time, hhmm string) (time.Time, error) {
 	t, err := time.Parse("15:04", hhmm)
 	if err != nil {
 		return time.Time{}, err
 	}
-	local := day.In(businessLocation)
-	return time.Date(local.Year(), local.Month(), local.Day(), t.Hour(), t.Minute(), 0, 0, businessLocation), nil
+	local := day.In(clock.BusinessLocation)
+	return time.Date(local.Year(), local.Month(), local.Day(), t.Hour(), t.Minute(), 0, 0, clock.BusinessLocation), nil
 }
 
 // weekdayIndex converts t to schedule.WashingPointSchedule's weekday
@@ -242,7 +221,7 @@ func weekdayIndex(t time.Time) int {
 
 // resolveDaySchedule turns row (the schedule for day's weekday, or nil if
 // the washing point has none yet) into a DaySchedule anchored to real
-// businessLocation instants via combineDayAndTime. A nil row, a closed
+// clock.BusinessLocation instants via combineDayAndTime. A nil row, a closed
 // row, or a row missing open/close times all resolve to "closed" — a
 // missing schedule should never silently fall back to some assumed set of
 // hours.
@@ -345,9 +324,8 @@ type createBookingRequest struct {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -414,9 +392,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 // get returns a booking to its owner or to staff/admin; anyone else gets a
 // 404, matching the ownership-hiding pattern used elsewhere (see car.Handler).
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -448,9 +425,8 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 // docs/PLAN_WEB_APPS.md phase 7 — the worker app's "Снять" no-show
 // action) — same ownership-hiding 404 pattern as get/updateStatus above.
 func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -495,9 +471,8 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) togglePause(w http.ResponseWriter, r *http.Request, action func(context.Context, uuid.UUID) (*Queue, error)) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -529,9 +504,8 @@ type updateStatusRequest struct {
 }
 
 func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -589,9 +563,8 @@ type boardItemResponse struct {
 // authUser.WashingPointID regardless of the query param, matching the
 // OwnsWashingPoint pattern used everywhere else (see reqctx.AuthUser).
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -628,7 +601,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 // listByWashingPoint is the worker/cabinet "today's queue" board
 // (docs/PLAN_WEB_APPS.md phase 7) — scoped to bookings scheduled on one
-// calendar day in businessLocation, defaulting to today when ?date= is
+// calendar day in clock.BusinessLocation, defaulting to today when ?date= is
 // omitted. Before phase 7 this returned every live booking regardless of
 // date; no shipped app called this endpoint yet (confirmed by searching
 // q-wash-admin/q-wash-cabinet's use of q-wash-shared's API client), so
@@ -644,7 +617,7 @@ func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	dayStart, dayEnd := dayBounds(day)
+	dayStart, dayEnd := clock.DayBounds(day)
 
 	rows, err := h.repo.ListLiveByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
 	if err != nil {
@@ -658,14 +631,6 @@ func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-// dayBounds returns [start, end) for day's calendar date in
-// businessLocation — midnight to the next midnight, local time.
-func dayBounds(day time.Time) (time.Time, time.Time) {
-	local := day.In(businessLocation)
-	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, businessLocation)
-	return start, start.AddDate(0, 0, 1)
 }
 
 // toBoardItems enriches raw queue rows with the customer's car name and the
@@ -840,10 +805,10 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 		return boardResponse{}, err
 	}
 
-	// Today only, businessLocation-bounded — unlike boxesLive's deliberately
+	// Today only, clock.BusinessLocation-bounded — unlike boxesLive's deliberately
 	// unfiltered query, a lobby TV showing a booking from next week in its
 	// waiting list would just be noise for whoever's standing in front of it.
-	dayStart, dayEnd := dayBounds(time.Now())
+	dayStart, dayEnd := clock.DayBounds(time.Now())
 	rows, err := h.repo.ListLiveByWashingPointAndDate(ctx, washingPointID, dayStart, dayEnd)
 	if err != nil {
 		return boardResponse{}, err
@@ -948,9 +913,8 @@ func lastNDigits(s string, n int) string {
 // history is the caller's full booking history across every status,
 // most recently scheduled first, paginated.
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -1045,9 +1009,8 @@ func (h *Handler) boardEvents(w http.ResponseWriter, r *http.Request) {
 // reaches a terminal state or the client disconnects. Ownership uses the
 // same 404-not-403 pattern as get.
 func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 

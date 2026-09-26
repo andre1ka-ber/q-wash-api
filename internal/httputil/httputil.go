@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/platform/reqctx"
 )
 
 func WriteJSON(w http.ResponseWriter, status int, body any) {
@@ -109,4 +110,20 @@ type PaginatedBody[T any] struct {
 // WritePaginated writes the standard {items, page, page_size, total} envelope.
 func WritePaginated[T any](w http.ResponseWriter, status int, items []T, p Pagination, total int64) {
 	WriteJSON(w, status, PaginatedBody[T]{Items: items, Page: p.Page, PageSize: p.PageSize, Total: total})
+}
+
+// AuthUser returns the authenticated principal RequireAuth put on the
+// request. If there is none it writes the standard 401 itself and reports
+// false, so a handler only has to `return`:
+//
+//	authUser, ok := httputil.AuthUser(w, r)
+//	if !ok {
+//		return
+//	}
+func AuthUser(w http.ResponseWriter, r *http.Request) (reqctx.AuthUser, bool) {
+	u, ok := reqctx.AuthUserFromContext(r.Context())
+	if !ok {
+		WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
+	}
+	return u, ok
 }

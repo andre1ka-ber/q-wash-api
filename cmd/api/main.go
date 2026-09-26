@@ -38,6 +38,10 @@ func run() error {
 		return err
 	}
 
+	for _, w := range cfg.Warnings() {
+		slog.Warn(w)
+	}
+
 	gormLogLevel := gormlogger.Warn
 	if cfg.Env == "development" {
 		gormLogLevel = gormlogger.Info

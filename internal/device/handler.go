@@ -8,7 +8,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 )
 
 type Handler struct {
@@ -37,9 +36,8 @@ type registerRequest struct {
 const maxTokenLen = 4096
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
@@ -66,9 +64,8 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) unregister(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	if err := h.repo.DeleteOwned(r.Context(), authUser.ID, chi.URLParam(r, "token")); err != nil {

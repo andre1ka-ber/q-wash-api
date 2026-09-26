@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/schedule"
 )
 
@@ -271,10 +272,10 @@ func TestResolveDaySchedule_OpenWithBreak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDaySchedule: %v", err)
 	}
-	wantOpen := time.Date(2026, 8, 6, 8, 0, 0, 0, businessLocation)
-	wantClose := time.Date(2026, 8, 6, 20, 0, 0, 0, businessLocation)
-	wantBreakStart := time.Date(2026, 8, 6, 13, 0, 0, 0, businessLocation)
-	wantBreakEnd := time.Date(2026, 8, 6, 14, 0, 0, 0, businessLocation)
+	wantOpen := time.Date(2026, 8, 6, 8, 0, 0, 0, clock.BusinessLocation)
+	wantClose := time.Date(2026, 8, 6, 20, 0, 0, 0, clock.BusinessLocation)
+	wantBreakStart := time.Date(2026, 8, 6, 13, 0, 0, 0, clock.BusinessLocation)
+	wantBreakEnd := time.Date(2026, 8, 6, 14, 0, 0, 0, clock.BusinessLocation)
 
 	if !ds.IsOpen {
 		t.Fatal("expected IsOpen true")

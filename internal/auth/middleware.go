@@ -65,9 +65,8 @@ func RequireRole(allowed ...string) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authUser, ok := reqctx.AuthUserFromContext(r.Context())
+			authUser, ok := httputil.AuthUser(w, r)
 			if !ok {
-				httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 				return
 			}
 			if _, ok := allowedSet[authUser.Role]; !ok {

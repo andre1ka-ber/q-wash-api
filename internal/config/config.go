@@ -76,6 +76,57 @@ type PushConfig struct {
 	ServiceAccountJSON []byte
 }
 
+// Dev-only fallbacks for the two signing secrets: convenient locally, fatal
+// if they ever reach production (anyone could then forge access tokens).
+const (
+	devAccessSecret  = "dev-access-secret-change-me"
+	devRefreshPepper = "dev-refresh-pepper-change-me"
+	minSecretLen     = 32
+)
+
+// IsProduction reports whether the API is running as a production deploy.
+func (c Config) IsProduction() bool { return c.Env == "production" }
+
+// Validate refuses to start a production deploy with unsafe configuration:
+// the built-in dev secrets, or secrets too short to be real. Other
+// environments (development, test) are never blocked. CORS "*" is not a
+// startup error (a deploy may legitimately serve a public API) but is
+// reported by Warnings.
+func (c Config) Validate() error {
+	if !c.IsProduction() {
+		return nil
+	}
+	var problems []string
+	check := func(name, value, devDefault string) {
+		switch {
+		case value == devDefault:
+			problems = append(problems, name+" is still the built-in dev default")
+		case len(value) < minSecretLen:
+			problems = append(problems, fmt.Sprintf("%s is too short (need at least %d characters)", name, minSecretLen))
+		}
+	}
+	check("JWT_ACCESS_SECRET", c.Auth.AccessTokenSecret, devAccessSecret)
+	check("REFRESH_TOKEN_PEPPER", c.Auth.RefreshTokenPepper, devRefreshPepper)
+	if len(problems) > 0 {
+		return fmt.Errorf("unsafe production configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// Warnings lists non-fatal configuration smells worth logging at startup.
+func (c Config) Warnings() []string {
+	var warnings []string
+	if c.IsProduction() {
+		for _, origin := range c.HTTP.CORSAllowedOrigins {
+			if origin == "*" {
+				warnings = append(warnings, "CORS_ALLOWED_ORIGINS is \"*\" in production; lock it down to the real frontend origins")
+				break
+			}
+		}
+	}
+	return warnings
+}
+
 func Load() (Config, error) {
 	cfg := Config{
 		Env: getEnv("APP_ENV", "development"),
@@ -92,8 +143,8 @@ func Load() (Config, error) {
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
 		Auth: AuthConfig{
-			AccessTokenSecret:  getEnv("JWT_ACCESS_SECRET", "dev-access-secret-change-me"),
-			RefreshTokenPepper: getEnv("REFRESH_TOKEN_PEPPER", "dev-refresh-pepper-change-me"),
+			AccessTokenSecret:  getEnv("JWT_ACCESS_SECRET", devAccessSecret),
+			RefreshTokenPepper: getEnv("REFRESH_TOKEN_PEPPER", devRefreshPepper),
 		},
 		Storage: StorageConfig{
 			Dir:     getEnv("UPLOADS_DIR", "./uploads"),
@@ -126,6 +177,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 

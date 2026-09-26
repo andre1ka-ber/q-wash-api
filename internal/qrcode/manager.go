@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/washingpoint"
 )
@@ -148,9 +149,8 @@ func (m *Manager) RequestReplacement(ctx context.Context, qrCodeID uuid.UUID) (*
 }
 
 func (m *Manager) Stats(ctx context.Context, c *QRCode) (Stats, error) {
-	loc := queue.BusinessLocation()
-	now := time.Now().In(loc)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	loc := clock.BusinessLocation
+	dayStart, _ := clock.DayBounds(time.Now())
 	sevenDaysAgo := dayStart.AddDate(0, 0, -6)
 
 	scansToday, err := m.repo.CountScans(ctx, c.ID, dayStart)

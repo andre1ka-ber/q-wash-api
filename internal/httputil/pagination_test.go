@@ -4,7 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"q-wash-api/internal/platform/reqctx"
 )
 
 func TestParsePagination(t *testing.T) {
@@ -52,4 +57,29 @@ func TestWritePaginatedEnvelope(t *testing.T) {
 	if rec.Code != http.StatusOK || len(body.Items) != 2 || body.Page != 2 || body.PageSize != 2 || body.Total != 5 {
 		t.Fatalf("unexpected envelope: code=%d %+v", rec.Code, body)
 	}
+}
+
+func TestAuthUser(t *testing.T) {
+	t.Run("returns the principal RequireAuth stored", func(t *testing.T) {
+		want := reqctx.AuthUser{ID: uuid.New(), Role: "staff"}
+		r := httptest.NewRequest(http.MethodGet, "/x", nil)
+		r = r.WithContext(reqctx.WithAuthUser(r.Context(), want))
+		rec := httptest.NewRecorder()
+
+		got, ok := AuthUser(rec, r)
+		if !ok || got.ID != want.ID || got.Role != "staff" {
+			t.Fatalf("got %+v ok=%v", got, ok)
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatal("nothing should be written on success")
+		}
+	})
+
+	t.Run("without one it writes the standard 401 itself", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		_, ok := AuthUser(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+		if ok || rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), `"unauthenticated"`) {
+			t.Fatalf("ok=%v code=%d body=%s", ok, rec.Code, rec.Body.String())
+		}
+	})
 }

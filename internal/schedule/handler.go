@@ -7,7 +7,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -84,9 +83,8 @@ type replaceRequest struct {
 }
 
 func (h *Handler) replace(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 

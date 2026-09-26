@@ -14,6 +14,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/platform/eventbus"
 	"q-wash-api/internal/schedule"
 	"q-wash-api/internal/service"
@@ -127,7 +128,7 @@ func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid
 
 	end := start.Add(time.Duration(svc.DurationMinutes) * time.Minute)
 
-	weekday := weekdayIndex(start.In(businessLocation))
+	weekday := weekdayIndex(start.In(clock.BusinessLocation))
 	scheduleRow, err := m.scheduleRepo.FindByWeekday(ctx, wp.ID, weekday)
 	if err != nil {
 		return nil, err

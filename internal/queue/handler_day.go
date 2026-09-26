@@ -14,6 +14,7 @@ import (
 	"q-wash-api/internal/auth"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/service"
 )
 
@@ -40,7 +41,7 @@ type dayItemResponse struct {
 const ticketNumberBase = 10
 
 // listDay is the cabinet's "Очередь" day view: every booking scheduled
-// that calendar day (businessLocation), any status, enriched with the
+// that calendar day (clock.BusinessLocation), any status, enriched with the
 // staff-only detail the public board deliberately hides (full phone,
 // plate, client name, price). Tickets are "<box letter>-<n>", n counting
 // the box's bookings that day in creation order — stable across status
@@ -56,7 +57,7 @@ func (h *Handler) listDay(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	dayStart, dayEnd := dayBounds(day)
+	dayStart, dayEnd := clock.DayBounds(day)
 
 	rows, err := h.repo.FindByWashingPointAndRange(r.Context(), washingPointID, dayStart, dayEnd)
 	if err != nil {

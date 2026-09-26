@@ -93,7 +93,7 @@ func freeBoxes(start, end time.Time, boxesCount int, busy []BusyBoxInterval) []i
 }
 
 // DaySchedule is the resolved operating window(s) for one calendar day —
-// real businessLocation instants derived from a schedule.WashingPointSchedule
+// real clock.BusinessLocation instants derived from a schedule.WashingPointSchedule
 // row (docs/PLAN_WEB_APPS.md phase 5), replacing the flat
 // WashingPoint.OpenTime/CloseTime columns as the source of truth for both
 // GET .../availability and Manager.CreateBooking's operating-hours check.

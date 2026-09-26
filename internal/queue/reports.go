@@ -10,6 +10,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -105,7 +106,7 @@ func (h *Handler) reports(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
-// periodBounds returns [start, end) in businessLocation for period, ending
+// periodBounds returns [start, end) in clock.BusinessLocation for period, ending
 // at today's close (i.e. "now"'s calendar day, not literally now — same
 // whole-day granularity dayBounds already uses elsewhere). week is the
 // trailing 7 calendar days including today; month is month-to-date (the
@@ -113,13 +114,13 @@ func (h *Handler) reports(w http.ResponseWriter, r *http.Request) {
 // month — matches the design mock's own period labels ("19 – 25 сентября"
 // / "1 – 25 сентября").
 func periodBounds(period reportPeriod, now time.Time) (time.Time, time.Time) {
-	todayStart, todayEnd := dayBounds(now)
+	todayStart, todayEnd := clock.DayBounds(now)
 	switch period {
 	case periodWeek:
 		return todayStart.AddDate(0, 0, -6), todayEnd
 	case periodMonth:
-		local := now.In(businessLocation)
-		monthStart := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, businessLocation)
+		local := now.In(clock.BusinessLocation)
+		monthStart := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, clock.BusinessLocation)
 		return monthStart, todayEnd
 	default:
 		return todayStart, todayEnd
@@ -146,8 +147,8 @@ func formatRuDate(t time.Time) string {
 // "19 – 25 сентября 2026"). end is exclusive (the next midnight), so the
 // inclusive last day is end minus one day.
 func rangeLabel(period reportPeriod, start, end time.Time) string {
-	lastDay := end.AddDate(0, 0, -1).In(businessLocation)
-	first := start.In(businessLocation)
+	lastDay := end.AddDate(0, 0, -1).In(clock.BusinessLocation)
+	first := start.In(clock.BusinessLocation)
 	if period == periodToday {
 		return formatRuDate(lastDay)
 	}
@@ -400,7 +401,7 @@ func reportBars(period reportPeriod, start, end, now time.Time, rows []Queue, pr
 		buckets[idx].revenue += priceByOption[row.PriceOptionID]
 	}
 
-	nowLocal := now.In(businessLocation)
+	nowLocal := now.In(clock.BusinessLocation)
 	bars := make([]reportsBar, len(buckets))
 	for i, b := range buckets {
 		highlighted := false
@@ -419,8 +420,8 @@ func reportBars(period reportPeriod, start, end, now time.Time, rows []Queue, pr
 }
 
 func sameDay(a, b time.Time) bool {
-	ay, am, ad := a.In(businessLocation).Date()
-	by, bm, bd := b.In(businessLocation).Date()
+	ay, am, ad := a.In(clock.BusinessLocation).Date()
+	by, bm, bd := b.In(clock.BusinessLocation).Date()
 	return ay == by && am == bm && ad == bd
 }
 
@@ -447,9 +448,9 @@ func dailyBuckets(start, end time.Time) []reportBucket {
 }
 
 func bucketIndex(period reportPeriod, start, t time.Time) int {
-	local := t.In(businessLocation)
+	local := t.In(clock.BusinessLocation)
 	if period == periodToday {
 		return local.Hour()
 	}
-	return int(local.Sub(start.In(businessLocation)).Hours()) / 24
+	return int(local.Sub(start.In(clock.BusinessLocation)).Hours()) / 24
 }

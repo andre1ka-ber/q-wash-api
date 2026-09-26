@@ -47,8 +47,8 @@ type Queue struct {
 	Source           Source     `gorm:"type:varchar(8);not null;default:app"`
 	CanceledAt       *time.Time
 	// PausedAt is only meaningful while Status is StatusWashing — toggled
-	// by the worker app's pause/resume actions (docs/PLAN_WEB_APPS.md
-	// phase 7), not yet wired to any endpoint.
+	// by the worker app's pause/resume actions (PATCH .../pause and .../resume,
+	// docs/PLAN_WEB_APPS.md phase 7).
 	PausedAt  *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time

@@ -11,7 +11,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -303,9 +302,8 @@ func (h *Handler) disable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getMine(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	if authUser.WashingPointID == nil {
@@ -321,9 +319,8 @@ func (h *Handler) getMine(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) requestReplacement(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 	if authUser.WashingPointID == nil {

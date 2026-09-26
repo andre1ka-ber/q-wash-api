@@ -10,7 +10,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
+	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/service"
 	"q-wash-api/internal/user"
 )
@@ -21,9 +21,8 @@ import (
 // OwnsWashingPoint convention). On failure it writes the error response
 // and returns ok=false.
 func ownWashingPointID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return uuid.Nil, false
 	}
 	washingPointID, err := httputil.ParseUUIDParam(r, "id")
@@ -39,13 +38,13 @@ func ownWashingPointID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool)
 }
 
 // dayFromQuery reads the optional ?date=YYYY-MM-DD param as a calendar day
-// in businessLocation, defaulting to now (today) when omitted.
+// in clock.BusinessLocation, defaulting to now (today) when omitted.
 func dayFromQuery(r *http.Request) (time.Time, error) {
 	raw := r.URL.Query().Get("date")
 	if raw == "" {
 		return time.Now(), nil
 	}
-	day, err := time.ParseInLocation("2006-01-02", raw, businessLocation)
+	day, err := time.ParseInLocation("2006-01-02", raw, clock.BusinessLocation)
 	if err != nil {
 		return time.Time{}, apperror.BadRequest("invalid_date", "date must be in YYYY-MM-DD format")
 	}

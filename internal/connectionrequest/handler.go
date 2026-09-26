@@ -9,7 +9,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 )
 
 type Handler struct {
@@ -165,9 +164,8 @@ type updateStatusRequest struct {
 // updateStatus is the only write on an existing request: approve or
 // reject. There's no endpoint to edit the submitted contact fields.
 func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
