@@ -626,6 +626,91 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/v1/washing-points/{id}/queue/day:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: getQueueDay
+      summary: Cabinet "Очередь" day view (all statuses, full detail)
+      description: >
+        Requires role `staff`, `worker`, or `admin` at this washing point
+        (404 `washing_point_not_found` otherwise). Every booking scheduled
+        that calendar day (?date=, defaults to today, business timezone),
+        any status including `ready`/`canceled`/`no_show`, ordered by
+        `scheduled_start_at`. Unlike the public-facing board this exposes
+        the full phone, plate, client name and price — staff-only.
+        `ticket` is "<box letter>-<n>" (A-11, B-12…), numbered per box in
+        creation order so it never changes when statuses change or
+        bookings are added.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: date
+          in: query
+          required: false
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/QueueDayItem" } }
+                required: [items]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/queue/manual:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    post:
+      tags: [Queue]
+      operationId: createManualBooking
+      summary: Add a walk-in client to the queue (staff)
+      description: >
+        Requires role `staff`, `worker`, or `admin` at this washing point.
+        The client is found-or-created by `client_phone` (required, E.164)
+        as a `customer` user and gets a new car row (`car_name`, optional
+        `plate`), all inside the booking's transaction. Same service /
+        price-option / box / operating-hours / overlap validation as
+        `POST /queue`, but `scheduled_start_at` may be now or in the past
+        (walk-ins). Always created with status `queue` and source
+        `manual`. 409 `slot_unavailable`, 409 `active_booking_exists`
+        (client already has an active booking), 409 `phone_not_customer`
+        (phone belongs to a staff/worker/admin account).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                service_id: { type: string, format: uuid }
+                price_option_id: { type: string, format: uuid }
+                box_number: { type: integer, minimum: 1 }
+                scheduled_start_at: { type: string, format: date-time }
+                car_name: { type: string, maxLength: 255 }
+                plate: { type: string, maxLength: 32 }
+                client_phone: { type: string, example: "+992900000000" }
+                client_name: { type: string, maxLength: 255 }
+              required: [service_id, price_option_id, box_number, scheduled_start_at, car_name, client_phone]
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueDayItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /api/v1/washing-points/{id}/boxes/live:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -1133,15 +1218,18 @@ paths:
     patch:
       tags: [Queue]
       operationId: updateBookingStatus
-      summary: Advance a booking's status
+      summary: Move a booking's status (staff)
       description: >
         Requires role `staff`, `worker`, or `admin` (worker added
         docs/PLAN_WEB_APPS.md phase 7), scoped to the booking's own washing
         point (404 `queue_not_found` otherwise, same as a nonexistent id).
-        Forward-only, one step at a time (`queue` → `waiting` → `washing`
-        → `ready`); `ready` and `canceled` are terminal. 409
-        `invalid_status_transition` on a skip, a backward move, or any
-        move from a terminal state.
+        Forward one step at a time (`queue` → `waiting` → `washing` →
+        `ready`); `no_show` from `queue`/`waiting`; `queue` restores a
+        `no_show` or `canceled` booking (409 `slot_unavailable` if its
+        box/time was taken meanwhile, 409 `active_booking_exists` if the
+        customer has another active booking). `ready` is terminal. 409
+        `invalid_status_transition` on any other move. Cancel stays the
+        separate `/cancel` action.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1984,7 +2072,8 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        status: { type: string, enum: [queue, waiting, washing, ready, canceled] }
+        status: { type: string, enum: [queue, waiting, washing, ready, canceled, no_show] }
+        source: { type: string, enum: [app, qr, manual] }
         user_id: { type: string, format: uuid }
         car_id: { type: string, format: uuid }
         service_id: { type: string, format: uuid }
@@ -2008,6 +2097,27 @@ components:
       required:
         [id, status, user_id, car_id, service_id, price_option_id, washing_point_id, box_number,
          scheduled_start_at, scheduled_end_at, created_at, cars_ahead]
+
+    QueueDayItem:
+      type: object
+      description: Staff-only detailed view of one booking for the cabinet's day queue.
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queue, waiting, washing, ready, canceled, no_show] }
+        ticket: { type: string, example: "A-11" }
+        box_number: { type: integer, minimum: 1 }
+        scheduled_start_at: { type: string, format: date-time }
+        scheduled_end_at: { type: string, format: date-time }
+        paused_at: { type: string, format: date-time, nullable: true }
+        source: { type: string, enum: [app, qr, manual] }
+        car_name: { type: string }
+        plate: { type: string }
+        client_name: { type: string }
+        client_phone: { type: string }
+        service_name: { type: string }
+        price_option_name: { type: string }
+        price_cents: { type: integer }
+      required: [id, status, ticket, box_number, scheduled_start_at, scheduled_end_at, source, car_name, client_phone, service_name, price_option_name, price_cents]
 
     BoardItem:
       type: object
@@ -2202,7 +2312,7 @@ components:
     BookingStatusUpdate:
       type: object
       properties:
-        status: { type: string, enum: [waiting, washing, ready] }
+        status: { type: string, enum: [queue, waiting, washing, ready, no_show] }
       required: [status]
 
     AvailabilitySlot:

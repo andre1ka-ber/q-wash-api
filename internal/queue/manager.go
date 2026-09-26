@@ -2,7 +2,9 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +17,7 @@ import (
 	"q-wash-api/internal/platform/eventbus"
 	"q-wash-api/internal/schedule"
 	"q-wash-api/internal/service"
+	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -46,14 +49,123 @@ type CreateBookingInput struct {
 	Notes            *string
 }
 
+// bookingPlan is everything CreateBooking and CreateManualBooking resolve
+// before touching the DB inside the washing-point lock: the validated
+// service/point and the operating-hours window the new booking must fit.
+type bookingPlan struct {
+	wp       *washingpoint.WashingPoint
+	svc      *service.Service
+	end      time.Time
+	dayOpen  time.Time
+	dayClose time.Time
+}
+
+// planBooking validates the parts of a booking request that don't depend
+// on who owns it: service/price-option/washing-point relationships, box
+// range/closed state, and operating hours. requireFuture is true for
+// customer bookings (start must be after now) and false for staff
+// walk-ins, which start "now" by definition. expectWashingPoint, when
+// non-nil, additionally requires the service to belong to that point.
+func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid.UUID, boxNumber int, start time.Time, requireFuture bool, expectWashingPoint *uuid.UUID) (*bookingPlan, error) {
+	svc, err := m.serviceRepo.FindByID(ctx, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if expectWashingPoint != nil && svc.WashingPointID != *expectWashingPoint {
+		return nil, apperror.NotFound("service_not_found", "service not found")
+	}
+	if !svc.IsActive {
+		return nil, apperror.BadRequest("service_inactive", "service is not currently available")
+	}
+
+	hasPriceOption := false
+	for _, po := range svc.PriceOptions {
+		if po.ID == priceOptionID {
+			hasPriceOption = true
+			break
+		}
+	}
+	if !hasPriceOption {
+		return nil, apperror.BadRequest("invalid_price_option", "price option does not belong to this service")
+	}
+
+	wp, err := m.wpRepo.FindByID(ctx, svc.WashingPointID)
+	if err != nil {
+		return nil, err
+	}
+	if wp.Status != washingpoint.StatusActive {
+		return nil, apperror.BadRequest("washing_point_inactive", "washing point is not currently available")
+	}
+
+	if boxNumber < 1 || boxNumber > wp.BoxesCount {
+		return nil, apperror.BadRequest("invalid_box_number", fmt.Sprintf("box_number must be between 1 and %d", wp.BoxesCount))
+	}
+	requestedBox, err := m.boxRepo.FindByNumber(ctx, wp.ID, boxNumber)
+	if err != nil {
+		return nil, err
+	}
+	if requestedBox != nil && !requestedBox.IsOpen {
+		return nil, apperror.Conflict("box_closed", "the requested box is currently closed")
+	}
+
+	if requireFuture && !start.After(time.Now()) {
+		return nil, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be in the future")
+	}
+
+	end := start.Add(time.Duration(svc.DurationMinutes) * time.Minute)
+
+	weekday := weekdayIndex(start.In(businessLocation))
+	scheduleRow, err := m.scheduleRepo.FindByWeekday(ctx, wp.ID, weekday)
+	if err != nil {
+		return nil, err
+	}
+	daySchedule, err := resolveDaySchedule(start, scheduleRow)
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	if !daySchedule.Contains(start, end) {
+		return nil, apperror.BadRequest("outside_operating_hours", "requested time is outside the washing point's operating hours")
+	}
+	return &bookingPlan{wp: wp, svc: svc, end: end, dayOpen: daySchedule.Open, dayClose: daySchedule.Close}, nil
+}
+
+// insertLocked locks the washing point row, re-reads the day's busy
+// intervals inside the lock, verifies the box is free, and inserts q —
+// beforeInsert (if set) runs inside the same transaction after the
+// availability check, so any rows it creates (walk-in user/car) roll back
+// with the booking. That lock serializes concurrent booking attempts for
+// the same washing point — without it, two transactions could both read
+// "box 1 is free" before either commits and both try to claim it. The DB's
+// EXCLUDE constraint (see migrations) is still there as a last-resort
+// backstop if that ever happened anyway.
+func (m *Manager) insertLocked(ctx context.Context, plan *bookingPlan, q *Queue, beforeInsert func(tx *gorm.DB, q *Queue) error) error {
+	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var locked washingpoint.WashingPoint
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, "id = ?", plan.wp.ID).Error; err != nil {
+			return apperror.Internal(err)
+		}
+
+		txRepo := m.repo.WithTx(tx)
+		busy, err := txRepo.FindActiveBookingsInRange(ctx, plan.wp.ID, plan.dayOpen, plan.dayClose)
+		if err != nil {
+			return err
+		}
+		if err := verifyBoxAvailable(q.BoxNumber, q.ScheduledStartAt, q.ScheduledEndAt, busy); err != nil {
+			return err
+		}
+		if beforeInsert != nil {
+			if err := beforeInsert(tx, q); err != nil {
+				return err
+			}
+		}
+		return txRepo.Create(ctx, q)
+	})
+}
+
 // CreateBooking validates the request against the caller's own car, the
 // service/price-option/washing-point relationships, and operating hours,
 // then assigns a box and inserts the row inside a transaction that locks
-// the washing point row for its duration. That lock serializes concurrent
-// booking attempts for the same washing point — without it, two
-// transactions could both read "box 1 is free" before either commits and
-// both try to claim it. The DB's EXCLUDE constraint (see migrations) is
-// still there as a last-resort backstop if that ever happened anyway.
+// the washing point row for its duration (see insertLocked).
 func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Queue, error) {
 	if _, err := m.carRepo.FindOwnedByID(ctx, in.CarID, in.UserID); err != nil {
 		return nil, err
@@ -71,105 +183,109 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, apperror.Conflict("active_booking_exists", "you already have an active booking")
 	}
 
-	svc, err := m.serviceRepo.FindByID(ctx, in.ServiceID)
+	plan, err := m.planBooking(ctx, in.ServiceID, in.PriceOptionID, in.BoxNumber, in.ScheduledStartAt, true, nil)
 	if err != nil {
 		return nil, err
 	}
-	if !svc.IsActive {
-		return nil, apperror.BadRequest("service_inactive", "service is not currently available")
+
+	q := &Queue{
+		Status:           StatusQueue,
+		Source:           SourceApp,
+		UserID:           in.UserID,
+		CarID:            in.CarID,
+		ServiceID:        in.ServiceID,
+		PriceOptionID:    in.PriceOptionID,
+		WashingPointID:   plan.wp.ID,
+		BoxNumber:        in.BoxNumber,
+		ScheduledStartAt: in.ScheduledStartAt,
+		ScheduledEndAt:   plan.end,
+		Notes:            in.Notes,
+	}
+	if err := m.insertLocked(ctx, plan, q, nil); err != nil {
+		return nil, err
+	}
+	m.bus.Publish(plan.wp.ID)
+	return q, nil
+}
+
+type CreateManualBookingInput struct {
+	WashingPointID   uuid.UUID
+	ServiceID        uuid.UUID
+	PriceOptionID    uuid.UUID
+	BoxNumber        int
+	ScheduledStartAt time.Time
+	CarName          string
+	Plate            string
+	Phone            string
+	ClientName       string
+}
+
+// CreateManualBooking is the cabinet's "Добавить вручную": a staff-created
+// walk-in booking. The client is found-or-created by phone as a regular
+// customer user and gets a fresh car row (name + plate) — created inside
+// the booking's transaction so a lost slot race leaves nothing behind. An
+// existing account with a non-customer role (staff/worker/admin) is
+// rejected rather than booked against. Always starts in StatusQueue.
+func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookingInput) (*Queue, error) {
+	plan, err := m.planBooking(ctx, in.ServiceID, in.PriceOptionID, in.BoxNumber, in.ScheduledStartAt, false, &in.WashingPointID)
+	if err != nil {
+		return nil, err
 	}
 
-	hasPriceOption := false
-	for _, po := range svc.PriceOptions {
-		if po.ID == in.PriceOptionID {
-			hasPriceOption = true
-			break
+	q := &Queue{
+		Status:           StatusQueue,
+		Source:           SourceManual,
+		ServiceID:        in.ServiceID,
+		PriceOptionID:    in.PriceOptionID,
+		WashingPointID:   plan.wp.ID,
+		BoxNumber:        in.BoxNumber,
+		ScheduledStartAt: in.ScheduledStartAt,
+		ScheduledEndAt:   plan.end,
+	}
+	err = m.insertLocked(ctx, plan, q, func(tx *gorm.DB, q *Queue) error {
+		userRepo := user.NewRepository(tx)
+		u, err := userRepo.FindByPhone(ctx, in.Phone)
+		if err != nil {
+			var appErr *apperror.Error
+			if !errors.As(err, &appErr) || appErr.Code != "user_not_found" {
+				return err
+			}
+			u = &user.User{PhoneNumber: in.Phone, Role: user.RoleCustomer}
+			if in.ClientName != "" {
+				name := in.ClientName
+				u.Name = &name
+			}
+			if err := userRepo.Create(ctx, u); err != nil {
+				return err
+			}
+		} else if u.Role != user.RoleCustomer {
+			return apperror.Conflict("phone_not_customer", "this phone number belongs to a staff account")
 		}
-	}
-	if !hasPriceOption {
-		return nil, apperror.BadRequest("invalid_price_option", "price option does not belong to this service")
-	}
 
-	wp, err := m.wpRepo.FindByID(ctx, svc.WashingPointID)
-	if err != nil {
-		return nil, err
-	}
-	if wp.Status != washingpoint.StatusActive {
-		return nil, apperror.BadRequest("washing_point_inactive", "washing point is not currently available")
-	}
-
-	if in.BoxNumber < 1 || in.BoxNumber > wp.BoxesCount {
-		return nil, apperror.BadRequest("invalid_box_number", fmt.Sprintf("box_number must be between 1 and %d", wp.BoxesCount))
-	}
-	requestedBox, err := m.boxRepo.FindByNumber(ctx, wp.ID, in.BoxNumber)
-	if err != nil {
-		return nil, err
-	}
-	if requestedBox != nil && !requestedBox.IsOpen {
-		return nil, apperror.Conflict("box_closed", "the requested box is currently closed")
-	}
-
-	if !in.ScheduledStartAt.After(time.Now()) {
-		return nil, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be in the future")
-	}
-
-	duration := time.Duration(svc.DurationMinutes) * time.Minute
-	scheduledEndAt := in.ScheduledStartAt.Add(duration)
-
-	weekday := weekdayIndex(in.ScheduledStartAt.In(businessLocation))
-	scheduleRow, err := m.scheduleRepo.FindByWeekday(ctx, wp.ID, weekday)
-	if err != nil {
-		return nil, err
-	}
-	daySchedule, err := resolveDaySchedule(in.ScheduledStartAt, scheduleRow)
-	if err != nil {
-		return nil, apperror.Internal(err)
-	}
-	if !daySchedule.Contains(in.ScheduledStartAt, scheduledEndAt) {
-		return nil, apperror.BadRequest("outside_operating_hours", "requested time is outside the washing point's operating hours")
-	}
-	dayOpen, dayClose := daySchedule.Open, daySchedule.Close
-
-	var created *Queue
-	txErr := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var locked washingpoint.WashingPoint
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, "id = ?", wp.ID).Error; err != nil {
-			return apperror.Internal(err)
-		}
-
-		txRepo := m.repo.WithTx(tx)
-		busy, err := txRepo.FindActiveBookingsInRange(ctx, wp.ID, dayOpen, dayClose)
+		hasActive, err := m.repo.WithTx(tx).HasActiveForUser(ctx, u.ID)
 		if err != nil {
 			return err
 		}
-
-		if err := verifyBoxAvailable(in.BoxNumber, in.ScheduledStartAt, scheduledEndAt, busy); err != nil {
-			return err
+		if hasActive {
+			return apperror.Conflict("active_booking_exists", "this client already has an active booking")
 		}
 
-		q := &Queue{
-			Status:           StatusQueue,
-			UserID:           in.UserID,
-			CarID:            in.CarID,
-			ServiceID:        in.ServiceID,
-			PriceOptionID:    in.PriceOptionID,
-			WashingPointID:   wp.ID,
-			BoxNumber:        in.BoxNumber,
-			ScheduledStartAt: in.ScheduledStartAt,
-			ScheduledEndAt:   scheduledEndAt,
-			Notes:            in.Notes,
+		c := &car.Car{UserID: u.ID, Name: in.CarName}
+		if in.Plate != "" {
+			plate := in.Plate
+			c.Plate = &plate
 		}
-		if err := txRepo.Create(ctx, q); err != nil {
+		if err := car.NewRepository(tx).Create(ctx, c); err != nil {
 			return err
 		}
-		created = q
+		q.UserID, q.CarID = u.ID, c.ID
 		return nil
 	})
-	if txErr != nil {
-		return nil, txErr
+	if err != nil {
+		return nil, err
 	}
-	m.bus.Publish(wp.ID)
-	return created, nil
+	m.bus.Publish(plan.wp.ID)
+	return q, nil
 }
 
 // verifyBoxAvailable rejects boxNumber if any busy interval occupying that
@@ -253,13 +369,19 @@ func (m *Manager) Resume(ctx context.Context, id uuid.UUID) (*Queue, error) {
 	return q, nil
 }
 
-// forwardStatusTransitions is the only staff-driven state machine: one step
-// forward at a time, never skipping a stage and never backward. Canceling
-// is a separate, owner-only action (CancelBooking), not reachable here.
-var forwardStatusTransitions = map[Status]Status{
-	StatusQueue:   StatusWaiting,
-	StatusWaiting: StatusWashing,
-	StatusWashing: StatusReady,
+// staffStatusTransitions is the staff-driven state machine: forward one
+// step at a time (queue -> waiting -> washing -> ready), plus no_show from
+// queue/waiting, plus restoring a no_show or canceled booking to queue
+// (the cabinet's "Вернуть в очередь" — re-checked against the box's
+// occupancy by the DB constraint, 409 slot_unavailable if the slot has
+// been taken since). Canceling itself is a separate action
+// (CancelBooking), not reachable here.
+var staffStatusTransitions = map[Status][]Status{
+	StatusQueue:    {StatusWaiting, StatusNoShow},
+	StatusWaiting:  {StatusWashing, StatusNoShow},
+	StatusWashing:  {StatusReady},
+	StatusNoShow:   {StatusQueue},
+	StatusCanceled: {StatusQueue},
 }
 
 func (m *Manager) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus Status) (*Queue, error) {
@@ -268,12 +390,14 @@ func (m *Manager) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus Stat
 		return nil, err
 	}
 
-	expected, ok := forwardStatusTransitions[q.Status]
-	if !ok || expected != newStatus {
+	if !slices.Contains(staffStatusTransitions[q.Status], newStatus) {
 		return nil, apperror.Conflict("invalid_status_transition", fmt.Sprintf("cannot transition from %q to %q", q.Status, newStatus))
 	}
 
 	q.Status = newStatus
+	if newStatus == StatusQueue {
+		q.CanceledAt = nil
+	}
 	if err := m.repo.UpdateStatus(ctx, q); err != nil {
 		return nil, err
 	}

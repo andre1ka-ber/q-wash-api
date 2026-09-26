@@ -36,15 +36,15 @@ func (r *Repository) WithTx(tx *gorm.DB) *Repository {
 	return &Repository{db: tx}
 }
 
-// FindActiveBookingsInRange returns non-canceled bookings for
+// FindActiveBookingsInRange returns non-canceled, non-no-show bookings for
 // washingPointID whose interval overlaps [rangeStart, rangeEnd) — i.e.
 // scheduled_start_at < rangeEnd AND scheduled_end_at > rangeStart, the
 // standard half-open interval overlap test.
 func (r *Repository) FindActiveBookingsInRange(ctx context.Context, washingPointID uuid.UUID, rangeStart, rangeEnd time.Time) ([]Queue, error) {
 	var rows []Queue
 	err := r.db.WithContext(ctx).
-		Where("washing_point_id = ? AND status <> ? AND scheduled_start_at < ? AND scheduled_end_at > ?",
-			washingPointID, StatusCanceled, rangeEnd, rangeStart).
+		Where("washing_point_id = ? AND status NOT IN ? AND scheduled_start_at < ? AND scheduled_end_at > ?",
+			washingPointID, []Status{StatusCanceled, StatusNoShow}, rangeEnd, rangeStart).
 		Order("scheduled_start_at").
 		Find(&rows).Error
 	if err != nil {
@@ -216,18 +216,33 @@ func (r *Repository) FindScheduledInRangeNetworkWide(ctx context.Context, rangeS
 	return rows, nil
 }
 
-// UpdateStatus writes status (and canceled_at, when set) only — never the
-// booking's other fields.
+// UpdateStatus writes status (plus canceled_at: set on cancel, cleared on
+// restore to queue) only — never the booking's other fields. Restoring a
+// canceled/no-show booking can collide with a newer booking in the same
+// box/time (EXCLUDE) or with the customer's other active booking (unique
+// index); both surface as the same friendly 409s as Create.
 func (r *Repository) UpdateStatus(ctx context.Context, q *Queue) error {
 	updates := map[string]any{"status": q.Status}
-	if q.Status == StatusCanceled {
+	switch q.Status {
+	case StatusCanceled:
 		updates["canceled_at"] = q.CanceledAt
+	case StatusQueue:
+		updates["canceled_at"] = nil
 	}
 	err := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ?", q.ID).Updates(updates).Error
-	if err != nil {
-		return apperror.Internal(err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case postgresExclusionViolation:
+			return apperror.Conflict("slot_unavailable", "the box is no longer free for this time")
+		case postgresUniqueViolation:
+			return apperror.Conflict("active_booking_exists", "the customer already has an active booking")
+		}
+	}
+	return apperror.Internal(err)
 }
 
 // UpdatePausedAt writes paused_at only — a map-based update so setting it

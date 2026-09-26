@@ -135,6 +135,19 @@ func (r *Repository) FindPriceOptionByID(ctx context.Context, id uuid.UUID) (*Se
 	return &opt, nil
 }
 
+// FindPriceOptionsByIDs batch-fetches price options for display (e.g. the
+// cabinet day queue). Missing ids are simply absent, not an error.
+func (r *Repository) FindPriceOptionsByIDs(ctx context.Context, ids []uuid.UUID) ([]ServicePriceOption, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var opts []ServicePriceOption
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&opts).Error; err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return opts, nil
+}
+
 func (r *Repository) CreatePriceOption(ctx context.Context, opt *ServicePriceOption) error {
 	if err := r.db.WithContext(ctx).Create(opt).Error; err != nil {
 		return apperror.Internal(err)

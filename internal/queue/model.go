@@ -15,11 +15,22 @@ const (
 	StatusWashing  Status = "washing"
 	StatusReady    Status = "ready"
 	StatusCanceled Status = "canceled"
+	StatusNoShow   Status = "no_show"
+)
+
+type Source string
+
+const (
+	SourceApp    Source = "app"
+	SourceQR     Source = "qr"
+	SourceManual Source = "manual"
 )
 
 // Queue is a booking / queue entry. Status moves forward through
 // queue -> waiting -> washing -> ready; canceled is reachable only from
-// queue or waiting (see docs/DATA_MODEL.md).
+// queue or waiting; no_show is likewise reachable from queue/waiting, and
+// both canceled and no_show can be restored to queue by staff (see
+// docs/DATA_MODEL.md).
 type Queue struct {
 	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
 	Status           Status    `gorm:"type:varchar(16);not null;default:queue"`
@@ -32,6 +43,7 @@ type Queue struct {
 	ScheduledStartAt time.Time `gorm:"not null"`
 	ScheduledEndAt   time.Time `gorm:"not null"`
 	Notes            *string   `gorm:"type:text"`
+	Source           Source    `gorm:"type:varchar(8);not null;default:app"`
 	CanceledAt       *time.Time
 	// PausedAt is only meaningful while Status is StatusWashing — toggled
 	// by the worker app's pause/resume actions (docs/PLAN_WEB_APPS.md

@@ -10,7 +10,6 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
-	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -78,18 +77,8 @@ type reportsResponse struct {
 // OwnsWashingPoint gate as board, since it's the same kind of
 // Queue-driven, per-point aggregation.
 func (h *Handler) reports(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	washingPointID, ok := ownWashingPointID(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
-		return
-	}
-	washingPointID, err := httputil.ParseUUIDParam(r, "id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	if !authUser.OwnsWashingPoint(washingPointID) {
-		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
 		return
 	}
 

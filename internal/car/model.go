@@ -11,6 +11,7 @@ type Car struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
 	UserID    uuid.UUID `gorm:"type:uuid;not null;index"`
 	Name      string    `gorm:"type:varchar(255);not null"`
+	Plate     *string   `gorm:"type:varchar(32)"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

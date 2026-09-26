@@ -89,6 +89,8 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 
 	r.Route("/washing-points/{id}/queue", func(board chi.Router) {
 		board.With(requireQueueOps...).Get("/", h.listByWashingPoint)
+		board.With(requireQueueOps...).Get("/day", h.listDay)
+		board.With(requireQueueOps...).Post("/manual", h.createManual)
 	})
 
 	r.Route("/washing-points/{id}/boxes/live", func(live chi.Router) {
@@ -286,6 +288,7 @@ type bookingResponse struct {
 	ScheduledStartAt time.Time  `json:"scheduled_start_at"`
 	ScheduledEndAt   time.Time  `json:"scheduled_end_at"`
 	Notes            *string    `json:"notes,omitempty"`
+	Source           string     `json:"source"`
 	CanceledAt       *time.Time `json:"canceled_at,omitempty"`
 	PausedAt         *time.Time `json:"paused_at,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
@@ -305,6 +308,7 @@ func toBookingResponse(q *Queue) bookingResponse {
 		ScheduledStartAt: q.ScheduledStartAt,
 		ScheduledEndAt:   q.ScheduledEndAt,
 		Notes:            q.Notes,
+		Source:           string(q.Source),
 		CanceledAt:       q.CanceledAt,
 		PausedAt:         q.PausedAt,
 		CreatedAt:        q.CreatedAt,
@@ -353,24 +357,24 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	carID, err := uuid.Parse(req.CarID)
+	carID, err := parseUUIDField(req.CarID, "car_id")
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_car_id", "car_id must be a valid uuid"))
+		httputil.WriteError(w, r, err)
 		return
 	}
-	serviceID, err := uuid.Parse(req.ServiceID)
+	serviceID, err := parseUUIDField(req.ServiceID, "service_id")
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_service_id", "service_id must be a valid uuid"))
+		httputil.WriteError(w, r, err)
 		return
 	}
-	priceOptionID, err := uuid.Parse(req.PriceOptionID)
+	priceOptionID, err := parseUUIDField(req.PriceOptionID, "price_option_id")
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_option_id", "price_option_id must be a valid uuid"))
+		httputil.WriteError(w, r, err)
 		return
 	}
-	scheduledStartAt, err := time.Parse(time.RFC3339, req.ScheduledStartAt)
+	scheduledStartAt, err := parseScheduledStart(req.ScheduledStartAt)
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be an RFC3339 timestamp"))
+		httputil.WriteError(w, r, err)
 		return
 	}
 
@@ -553,8 +557,10 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newStatus := Status(req.Status)
-	if newStatus != StatusWaiting && newStatus != StatusWashing && newStatus != StatusReady {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_status", "status must be one of: waiting, washing, ready"))
+	switch newStatus {
+	case StatusWaiting, StatusWashing, StatusReady, StatusNoShow, StatusQueue:
+	default:
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_status", "status must be one of: queue, waiting, washing, ready, no_show"))
 		return
 	}
 
@@ -628,29 +634,15 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 // q-wash-admin/q-wash-cabinet's use of q-wash-shared's API client), so
 // narrowing the default here doesn't regress anything already built.
 func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	washingPointID, ok := ownWashingPointID(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
 		return
 	}
 
-	washingPointID, err := httputil.ParseUUIDParam(r, "id")
+	day, err := dayFromQuery(r)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
-	}
-	if !authUser.OwnsWashingPoint(washingPointID) {
-		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
-		return
-	}
-
-	day := time.Now()
-	if raw := r.URL.Query().Get("date"); raw != "" {
-		day, err = time.Parse("2006-01-02", raw)
-		if err != nil {
-			httputil.WriteError(w, r, apperror.BadRequest("invalid_date", "date must be in YYYY-MM-DD format"))
-			return
-		}
 	}
 	dayStart, dayEnd := dayBounds(day)
 
@@ -682,37 +674,9 @@ func dayBounds(day time.Time) (time.Time, time.Time) {
 // showing a full phone number. Users/cars are batch-fetched rather than
 // queried per row.
 func (h *Handler) toBoardItems(ctx context.Context, rows []Queue) ([]boardItemResponse, error) {
-	userIDs := make([]uuid.UUID, 0, len(rows))
-	carIDs := make([]uuid.UUID, 0, len(rows))
-	seenUser := make(map[uuid.UUID]bool, len(rows))
-	seenCar := make(map[uuid.UUID]bool, len(rows))
-	for _, row := range rows {
-		if !seenUser[row.UserID] {
-			seenUser[row.UserID] = true
-			userIDs = append(userIDs, row.UserID)
-		}
-		if !seenCar[row.CarID] {
-			seenCar[row.CarID] = true
-			carIDs = append(carIDs, row.CarID)
-		}
-	}
-
-	users, err := h.userRepo.FindByIDs(ctx, userIDs)
+	refs, err := h.loadRefs(ctx, rows, false)
 	if err != nil {
 		return nil, err
-	}
-	cars, err := h.carRepo.FindByIDs(ctx, carIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	phoneByUser := make(map[uuid.UUID]string, len(users))
-	for _, u := range users {
-		phoneByUser[u.ID] = u.PhoneNumber
-	}
-	nameByCar := make(map[uuid.UUID]string, len(cars))
-	for _, c := range cars {
-		nameByCar[c.ID] = c.Name
 	}
 
 	items := make([]boardItemResponse, len(rows))
@@ -724,8 +688,8 @@ func (h *Handler) toBoardItems(ctx context.Context, rows []Queue) ([]boardItemRe
 			ScheduledStartAt:   row.ScheduledStartAt,
 			ScheduledEndAt:     row.ScheduledEndAt,
 			PausedAt:           row.PausedAt,
-			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
-			CarName:            nameByCar[row.CarID],
+			CustomerPhoneLast4: lastNDigits(refs.phone(row.UserID), 4),
+			CarName:            refs.carName(row.CarID),
 		}
 	}
 	return items, nil
@@ -743,18 +707,8 @@ func (h *Handler) toBoardItems(ctx context.Context, rows []Queue) ([]boardItemRe
 // "live" segment ahead of box.Handler's "/{boxId}" wildcard, so the two
 // don't conflict despite sharing a URL prefix.
 func (h *Handler) boxesLive(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	washingPointID, ok := ownWashingPointID(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
-		return
-	}
-	washingPointID, err := httputil.ParseUUIDParam(r, "id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	if !authUser.OwnsWashingPoint(washingPointID) {
-		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
 		return
 	}
 
@@ -808,63 +762,21 @@ type liveBoxResponse struct {
 // "current"; otherwise the first queue/waiting row for that number
 // (rows' existing order makes "first seen" the earliest) becomes "next".
 func (h *Handler) toLiveBoxItems(ctx context.Context, boxes []box.Box, rows []Queue) ([]liveBoxResponse, error) {
-	userIDs := make([]uuid.UUID, 0, len(rows))
-	carIDs := make([]uuid.UUID, 0, len(rows))
-	serviceIDs := make([]uuid.UUID, 0, len(rows))
-	seenUser := make(map[uuid.UUID]bool, len(rows))
-	seenCar := make(map[uuid.UUID]bool, len(rows))
-	seenService := make(map[uuid.UUID]bool, len(rows))
-	for _, row := range rows {
-		if !seenUser[row.UserID] {
-			seenUser[row.UserID] = true
-			userIDs = append(userIDs, row.UserID)
-		}
-		if !seenCar[row.CarID] {
-			seenCar[row.CarID] = true
-			carIDs = append(carIDs, row.CarID)
-		}
-		if !seenService[row.ServiceID] {
-			seenService[row.ServiceID] = true
-			serviceIDs = append(serviceIDs, row.ServiceID)
-		}
-	}
-
-	users, err := h.userRepo.FindByIDs(ctx, userIDs)
+	refs, err := h.loadRefs(ctx, rows, true)
 	if err != nil {
 		return nil, err
-	}
-	cars, err := h.carRepo.FindByIDs(ctx, carIDs)
-	if err != nil {
-		return nil, err
-	}
-	services, err := h.serviceRepo.FindByIDs(ctx, serviceIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	phoneByUser := make(map[uuid.UUID]string, len(users))
-	for _, u := range users {
-		phoneByUser[u.ID] = u.PhoneNumber
-	}
-	nameByCar := make(map[uuid.UUID]string, len(cars))
-	for _, c := range cars {
-		nameByCar[c.ID] = c.Name
-	}
-	nameByService := make(map[uuid.UUID]string, len(services))
-	for _, s := range services {
-		nameByService[s.ID] = s.Name
 	}
 
 	enrich := func(row Queue) *liveBoxBookingResponse {
 		return &liveBoxBookingResponse{
 			ID:                 row.ID.String(),
 			Status:             string(row.Status),
-			ServiceName:        nameByService[row.ServiceID],
+			ServiceName:        refs.serviceName(row.ServiceID),
 			ScheduledStartAt:   row.ScheduledStartAt,
 			ScheduledEndAt:     row.ScheduledEndAt,
 			PausedAt:           row.PausedAt,
-			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
-			CarName:            nameByCar[row.CarID],
+			CustomerPhoneLast4: lastNDigits(refs.phone(row.UserID), 4),
+			CarName:            refs.carName(row.CarID),
 		}
 	}
 
@@ -905,18 +817,8 @@ func (h *Handler) toLiveBoxItems(ctx context.Context, boxes []box.Box, rows []Qu
 // above — decided with the user for this endpoint specifically, even
 // though this screen faces a room of other customers, not just staff.
 func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	washingPointID, ok := ownWashingPointID(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
-		return
-	}
-	washingPointID, err := httputil.ParseUUIDParam(r, "id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	if !authUser.OwnsWashingPoint(washingPointID) {
-		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
 		return
 	}
 
@@ -947,49 +849,9 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 		return boardResponse{}, err
 	}
 
-	userIDs := make([]uuid.UUID, 0, len(rows))
-	carIDs := make([]uuid.UUID, 0, len(rows))
-	serviceIDs := make([]uuid.UUID, 0, len(rows))
-	seenUser := make(map[uuid.UUID]bool, len(rows))
-	seenCar := make(map[uuid.UUID]bool, len(rows))
-	seenService := make(map[uuid.UUID]bool, len(rows))
-	for _, row := range rows {
-		if !seenUser[row.UserID] {
-			seenUser[row.UserID] = true
-			userIDs = append(userIDs, row.UserID)
-		}
-		if !seenCar[row.CarID] {
-			seenCar[row.CarID] = true
-			carIDs = append(carIDs, row.CarID)
-		}
-		if !seenService[row.ServiceID] {
-			seenService[row.ServiceID] = true
-			serviceIDs = append(serviceIDs, row.ServiceID)
-		}
-	}
-	users, err := h.userRepo.FindByIDs(ctx, userIDs)
+	refs, err := h.loadRefs(ctx, rows, true)
 	if err != nil {
 		return boardResponse{}, err
-	}
-	cars, err := h.carRepo.FindByIDs(ctx, carIDs)
-	if err != nil {
-		return boardResponse{}, err
-	}
-	services, err := h.serviceRepo.FindByIDs(ctx, serviceIDs)
-	if err != nil {
-		return boardResponse{}, err
-	}
-	phoneByUser := make(map[uuid.UUID]string, len(users))
-	for _, u := range users {
-		phoneByUser[u.ID] = u.PhoneNumber
-	}
-	nameByCar := make(map[uuid.UUID]string, len(cars))
-	for _, c := range cars {
-		nameByCar[c.ID] = c.Name
-	}
-	nameByService := make(map[uuid.UUID]string, len(services))
-	for _, s := range services {
-		nameByService[s.ID] = s.Name
 	}
 
 	currentByBox := make(map[int]Queue, len(boxes))
@@ -1009,12 +871,12 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 		if cur, ok := currentByBox[b.Number]; ok {
 			item.Current = &boardBookingResponse{
 				Status:             string(cur.Status),
-				ServiceName:        nameByService[cur.ServiceID],
+				ServiceName:        refs.serviceName(cur.ServiceID),
 				ScheduledStartAt:   cur.ScheduledStartAt,
 				ScheduledEndAt:     cur.ScheduledEndAt,
 				PausedAt:           cur.PausedAt,
-				CustomerPhoneLast4: lastNDigits(phoneByUser[cur.UserID], 4),
-				CarName:            nameByCar[cur.CarID],
+				CustomerPhoneLast4: lastNDigits(refs.phone(cur.UserID), 4),
+				CarName:            refs.carName(cur.CarID),
 			}
 			boxesActive++
 		}
@@ -1027,10 +889,10 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 			ID:                 row.ID.String(),
 			Status:             string(row.Status),
 			BoxNumber:          row.BoxNumber,
-			ServiceName:        nameByService[row.ServiceID],
+			ServiceName:        refs.serviceName(row.ServiceID),
 			ScheduledStartAt:   row.ScheduledStartAt,
-			CustomerPhoneLast4: lastNDigits(phoneByUser[row.UserID], 4),
-			CarName:            nameByCar[row.CarID],
+			CustomerPhoneLast4: lastNDigits(refs.phone(row.UserID), 4),
+			CarName:            refs.carName(row.CarID),
 		}
 	}
 
@@ -1118,18 +980,8 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 // washing-point ownership check as board — the kiosk logs in as staff/admin,
 // no new role, per PLAN_WEB_APPS.md phase 8's own decision.
 func (h *Handler) boardEvents(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := reqctx.AuthUserFromContext(r.Context())
+	washingPointID, ok := ownWashingPointID(w, r)
 	if !ok {
-		httputil.WriteError(w, r, apperror.Unauthorized("unauthenticated", "authentication required"))
-		return
-	}
-	washingPointID, err := httputil.ParseUUIDParam(r, "id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	if !authUser.OwnsWashingPoint(washingPointID) {
-		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
 		return
 	}
 

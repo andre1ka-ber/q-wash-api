@@ -161,7 +161,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 
 	bookedMinutes := 0.0
 	for _, q := range bookings {
-		if q.Status == queue.StatusCanceled {
+		if q.Status == queue.StatusCanceled || q.Status == queue.StatusNoShow {
 			resp.CanceledToday++
 			continue
 		}

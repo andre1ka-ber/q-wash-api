@@ -50,26 +50,41 @@ func TestVerifyBoxAvailable_BackToBackNotOverlapping(t *testing.T) {
 	}
 }
 
-func TestForwardStatusTransitions_OnlyForwardOneStep(t *testing.T) {
-	want := map[Status]Status{
-		StatusQueue:   StatusWaiting,
-		StatusWaiting: StatusWashing,
-		StatusWashing: StatusReady,
+func TestStaffStatusTransitions(t *testing.T) {
+	want := map[Status][]Status{
+		StatusQueue:    {StatusWaiting, StatusNoShow},
+		StatusWaiting:  {StatusWashing, StatusNoShow},
+		StatusWashing:  {StatusReady},
+		StatusNoShow:   {StatusQueue},
+		StatusCanceled: {StatusQueue},
 	}
-	if len(forwardStatusTransitions) != len(want) {
-		t.Fatalf("expected %d entries, got %d", len(want), len(forwardStatusTransitions))
+	if len(staffStatusTransitions) != len(want) {
+		t.Fatalf("expected %d entries, got %d", len(want), len(staffStatusTransitions))
 	}
-	for from, to := range want {
-		if got := forwardStatusTransitions[from]; got != to {
-			t.Errorf("expected %q -> %q, got %q -> %q", from, to, from, got)
+	for from, tos := range want {
+		got := staffStatusTransitions[from]
+		if len(got) != len(tos) {
+			t.Errorf("%q: expected %v, got %v", from, tos, got)
+			continue
+		}
+		for i := range tos {
+			if got[i] != tos[i] {
+				t.Errorf("%q: expected %v, got %v", from, tos, got)
+			}
 		}
 	}
 }
 
-func TestForwardStatusTransitions_TerminalStatesHaveNoEntry(t *testing.T) {
-	for _, terminal := range []Status{StatusReady, StatusCanceled} {
-		if _, ok := forwardStatusTransitions[terminal]; ok {
-			t.Errorf("expected %q to be terminal (no forward transition), but found one", terminal)
+func TestStaffStatusTransitions_ReadyIsTerminal(t *testing.T) {
+	if _, ok := staffStatusTransitions[StatusReady]; ok {
+		t.Error("expected ready to be terminal (no staff transition)")
+	}
+}
+
+func TestTicketPrefix(t *testing.T) {
+	for box, want := range map[int]string{1: "A-", 2: "B-", 26: "Z-", 27: "A-"} {
+		if got := ticketPrefix(box); got != want {
+			t.Errorf("box %d: expected %q, got %q", box, want, got)
 		}
 	}
 }

@@ -246,7 +246,8 @@ The booking / queue entry. Central entity tying everything together.
 | field | type | notes |
 |---|---|---|
 | id | uuid | PK |
-| status | enum: `queue`, `waiting`, `washing`, `ready`, `canceled` | forward-moving state machine, see below |
+| status | enum: `queue`, `waiting`, `washing`, `ready`, `canceled`, `no_show` | mostly forward-moving state machine, see below. Cabinet labels: Записан=`queue`, Приехал=`waiting`, Моется=`washing`, Готово=`ready`, Отменён=`canceled`, Не приехал=`no_show` |
+| source | enum: `app`, `qr`, `manual`, default `app` | where the booking came from (migration `000022`). `manual` = staff walk-in via `POST /washing-points/{id}/queue/manual`; `qr` is reserved (nothing sets it yet) |
 | user_id | uuid | FK -> User |
 | car_id | uuid | FK -> Car |
 | service_id | uuid | FK -> Service |
@@ -260,7 +261,7 @@ The booking / queue entry. Central entity tying everything together.
 | paused_at | timestamp, nullable | only meaningful while `status = washing`. Toggled by `PATCH /queue/{id}/pause`/`/resume` (staff/worker/admin, `docs/PLAN_WEB_APPS.md` phase 7) via `queue.Manager.Pause`/`Resume` — 409 `cannot_pause`/`cannot_resume` outside `status = washing` or on a redundant call. Deliberately not a new `status` value: the forward-only state machine below stays untouched. |
 | created_at / updated_at | timestamp | |
 
-State machine: `queue -> waiting -> washing -> ready`. `canceled` reachable only from `queue` or `waiting` (spec: "cancel queue before changing status to washing"). No transition skips a stage; enforced in `queue.Manager` (app layer, not a DB constraint) — `PATCH /queue/{id}/status` (staff/worker/admin as of phase 7) drives the forward path one step at a time, `PATCH /queue/{id}/cancel` is the only way to reach `canceled` — the booking's own owner, or staff/worker/admin at its washing point (broadened from owner-only in phase 7, for the worker app's "Снять" no-show action; `queue.Manager.CancelBooking` itself no longer checks ownership — `queue.Handler.cancel` does, before calling it, same layering `updateStatus`/`pause`/`resume` already used).
+State machine: `queue -> waiting -> washing -> ready`; staff may also mark `no_show` from `queue`/`waiting`, and restore a `no_show` or `canceled` booking back to `queue` (`staffStatusTransitions` in `queue/manager.go`; the restore is re-checked by the box-overlap `EXCLUDE`, which ignores both `canceled` and `no_show` rows, and by the one-active-booking index). `canceled` reachable only from `queue` or `waiting` (spec: "cancel queue before changing status to washing"). No transition skips a stage; enforced in `queue.Manager` (app layer, not a DB constraint) — `PATCH /queue/{id}/status` (staff/worker/admin as of phase 7) drives the forward path one step at a time, `PATCH /queue/{id}/cancel` is the only way to reach `canceled` — the booking's own owner, or staff/worker/admin at its washing point (broadened from owner-only in phase 7, for the worker app's "Снять" no-show action; `queue.Manager.CancelBooking` itself no longer checks ownership — `queue.Handler.cancel` does, before calling it, same layering `updateStatus`/`pause`/`resume` already used).
 
 > Note on original spec: the `queue` model line ended with a trailing "optional" whose referent was ambiguous. Interpreted here as "there may be additional optional fields" (`notes`), not that `service_id` itself is optional — a service is required to resolve duration/price for scheduling. Flag if that's wrong.
 
