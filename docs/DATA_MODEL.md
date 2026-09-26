@@ -249,7 +249,7 @@ The booking / queue entry. Central entity tying everything together.
 | status | enum: `queue`, `waiting`, `washing`, `ready`, `canceled`, `no_show` | mostly forward-moving state machine, see below. Cabinet labels: Записан=`queue`, Приехал=`waiting`, Моется=`washing`, Готово=`ready`, Отменён=`canceled`, Не приехал=`no_show` |
 | source | enum: `app`, `qr`, `manual`, default `app` | where the booking came from (migration `000022`). `manual` = staff walk-in via `POST /washing-points/{id}/queue/manual`; `qr` is reserved (nothing sets it yet) |
 | user_id | uuid | FK -> User |
-| car_id | uuid | FK -> Car |
+| car_id | uuid, nullable | FK -> Car. Null only for staff walk-in bookings added without any car data (migration `000023`); API responses report the zero UUID for it |
 | service_id | uuid | FK -> Service |
 | price_option_id | uuid | FK -> ServicePriceOption, resolved price/duration snapshot at booking time |
 | washing_point_id | uuid | FK -> WashingPoint, denormalized for query convenience |

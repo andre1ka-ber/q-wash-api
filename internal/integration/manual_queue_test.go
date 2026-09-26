@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"q-wash-api/internal/car"
 	"q-wash-api/internal/user"
 )
 
@@ -120,6 +121,39 @@ func TestQueue_ManualBookingDayListAndRestore(t *testing.T) {
 		resp := env.do(t, http.MethodPatch, statusPath, staffAccess, map[string]string{"status": "queue"})
 		if resp.status != http.StatusOK || resp.str("status") != "queue" {
 			t.Fatalf("restore: got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("only the phone is required; a local number gets +992 and no car is created", func(t *testing.T) {
+		resp := env.do(t, http.MethodPost, manualPath, staffAccess, map[string]any{
+			"service_id": fx.serviceID, "price_option_id": fx.priceOptionID, "box_number": 1,
+			"scheduled_start_at": futureBookingTime(8), "client_phone": "90 022-23-33",
+		})
+		if resp.status != http.StatusCreated {
+			t.Fatalf("expected 201, got %d (%v)", resp.status, resp.body)
+		}
+		if resp.str("client_phone") != "+992900222333" || resp.str("car_name") != "" {
+			t.Fatalf("unexpected response: %v", resp.body)
+		}
+	})
+
+	t.Run("car data given for an existing client upserts their car instead of duplicating it", func(t *testing.T) {
+		if resp := env.do(t, http.MethodPatch, "/api/v1/queue/"+manualID+"/cancel", staffAccess, nil); resp.status != http.StatusOK {
+			t.Fatalf("cancel: got %d (%v)", resp.status, resp.body)
+		}
+		b := body(walkInPhone, 1, futureBookingTime(9))
+		b["car_name"] = "Toyota Camry 2020"
+		b["plate"] = "1234 ab 01"
+		resp := env.do(t, http.MethodPost, manualPath, staffAccess, b)
+		if resp.status != http.StatusCreated {
+			t.Fatalf("expected 201, got %d (%v)", resp.status, resp.body)
+		}
+		var cars []car.Car
+		if err := env.db.Joins("JOIN users ON users.id = cars.user_id").Where("users.phone_number = ?", walkInPhone).Find(&cars).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(cars) != 1 || cars[0].Name != "Toyota Camry 2020" {
+			t.Fatalf("expected the one existing car renamed, got %+v", cars)
 		}
 	})
 }

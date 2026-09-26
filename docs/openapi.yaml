@@ -673,9 +673,13 @@ paths:
       summary: Add a walk-in client to the queue (staff)
       description: >
         Requires role `staff`, `worker`, or `admin` at this washing point.
-        The client is found-or-created by `client_phone` (required, E.164)
-        as a `customer` user and gets a new car row (`car_name`, optional
-        `plate`), all inside the booking's transaction. Same service /
+        The client is found-or-created by `client_phone` (the only required
+        client field) as a `customer` user, all inside the booking's
+        transaction. The phone may be typed without a country code — the API
+        normalizes it to E.164 (bare local numbers get `+992`). `car_name`
+        and `plate` are both optional; when either is given the client's car
+        is upserted (matched by plate, else by name), otherwise the booking
+        has no car (`car_id` reports the zero UUID). Same service /
         price-option / box / operating-hours / overlap validation as
         `POST /queue`, but `scheduled_start_at` may be now or in the past
         (walk-ins). Always created with status `queue` and source
@@ -696,9 +700,9 @@ paths:
                 scheduled_start_at: { type: string, format: date-time }
                 car_name: { type: string, maxLength: 255 }
                 plate: { type: string, maxLength: 32 }
-                client_phone: { type: string, example: "+992900000000" }
+                client_phone: { type: string, example: "900000000", description: "E.164, or a local number (+992 is added)." }
                 client_name: { type: string, maxLength: 255 }
-              required: [service_id, price_option_id, box_number, scheduled_start_at, car_name, client_phone]
+              required: [service_id, price_option_id, box_number, scheduled_start_at, client_phone]
       responses:
         "201":
           description: Created
@@ -2117,7 +2121,7 @@ components:
         service_name: { type: string }
         price_option_name: { type: string }
         price_cents: { type: integer }
-      required: [id, status, ticket, box_number, scheduled_start_at, scheduled_end_at, source, car_name, client_phone, service_name, price_option_name, price_cents]
+      required: [id, status, ticket, box_number, scheduled_start_at, scheduled_end_at, source, client_phone, service_name, price_option_name, price_cents]
 
     BoardItem:
       type: object

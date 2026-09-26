@@ -300,7 +300,7 @@ func toBookingResponse(q *Queue) bookingResponse {
 		ID:               q.ID.String(),
 		Status:           string(q.Status),
 		UserID:           q.UserID.String(),
-		CarID:            q.CarID.String(),
+		CarID:            carIDString(q.CarID),
 		ServiceID:        q.ServiceID.String(),
 		PriceOptionID:    q.PriceOptionID.String(),
 		WashingPointID:   q.WashingPointID.String(),

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,46 @@ func ValidatePhoneNumber(phone string) error {
 		return apperror.BadRequest("invalid_phone_number", "phone number must be in E.164 format, e.g. +15551234567")
 	}
 	return nil
+}
+
+// DefaultCountryCode is prepended to phone numbers entered without one
+// (this app only serves Tajikistan, +992 — same single-market assumption
+// as businessLocation in internal/queue).
+const DefaultCountryCode = "992"
+
+// NormalizePhoneNumber turns staff-typed input into E.164: spaces, dashes
+// and parentheses are dropped; "+..." is kept as given; "00..." becomes
+// "+..."; a number that already starts with the country code gets the "+";
+// a bare local number (with or without a leading 0) gets DefaultCountryCode.
+// The result is validated with ValidatePhoneNumber.
+func NormalizePhoneNumber(raw string) (string, error) {
+	var digits strings.Builder
+	explicitPlus := false
+	for i, r := range strings.TrimSpace(raw) {
+		switch {
+		case r == '+' && i == 0:
+			explicitPlus = true
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+		case r == ' ' || r == '-' || r == '(' || r == ')' || r == '.':
+		default:
+			return "", ValidatePhoneNumber(raw)
+		}
+	}
+	d := digits.String()
+	switch {
+	case explicitPlus:
+	case strings.HasPrefix(d, "00"):
+		d = d[2:]
+	case strings.HasPrefix(d, DefaultCountryCode):
+	default:
+		d = DefaultCountryCode + strings.TrimPrefix(d, "0")
+	}
+	phone := "+" + d
+	if err := ValidatePhoneNumber(phone); err != nil {
+		return "", err
+	}
+	return phone, nil
 }
 
 type Service struct {

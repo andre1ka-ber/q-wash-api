@@ -1548,7 +1548,7 @@ func TestReports_DeltasAndMonthPeriod(t *testing.T) {
 	pastRow := queue.Queue{
 		Status:           queue.StatusReady,
 		UserID:           pastUser.ID,
-		CarID:            pastCarUUID,
+		CarID:            &pastCarUUID,
 		ServiceID:        svcUUID,
 		PriceOptionID:    priceUUID,
 		WashingPointID:   wpUUID,

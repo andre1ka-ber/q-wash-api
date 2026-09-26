@@ -61,8 +61,13 @@ type rowRefs struct {
 	services map[uuid.UUID]service.Service
 }
 
-func (r *rowRefs) phone(id uuid.UUID) string       { return r.users[id].PhoneNumber }
-func (r *rowRefs) carName(id uuid.UUID) string     { return r.cars[id].Name }
+func (r *rowRefs) phone(id uuid.UUID) string { return r.users[id].PhoneNumber }
+func (r *rowRefs) carName(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return r.cars[*id].Name
+}
 func (r *rowRefs) serviceName(id uuid.UUID) string { return r.services[id].Name }
 
 // loadRefs batch-fetches the users and cars for rows, plus their services
@@ -70,7 +75,17 @@ func (r *rowRefs) serviceName(id uuid.UUID) string { return r.services[id].Name 
 // don't need service names, so they skip that query).
 func (h *Handler) loadRefs(ctx context.Context, rows []Queue, withServices bool) (*rowRefs, error) {
 	userIDs := uniqueIDs(rows, func(q Queue) uuid.UUID { return q.UserID })
-	carIDs := uniqueIDs(rows, func(q Queue) uuid.UUID { return q.CarID })
+	carIDs := make([]uuid.UUID, 0, len(rows))
+	for _, id := range uniqueIDs(rows, func(q Queue) uuid.UUID {
+		if q.CarID == nil {
+			return uuid.Nil
+		}
+		return *q.CarID
+	}) {
+		if id != uuid.Nil {
+			carIDs = append(carIDs, id)
+		}
+	}
 
 	users, err := h.userRepo.FindByIDs(ctx, userIDs)
 	if err != nil {
@@ -129,4 +144,13 @@ func parseScheduledStart(raw string) (time.Time, error) {
 		return time.Time{}, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be an RFC3339 timestamp")
 	}
 	return t, nil
+}
+
+// carIDString keeps Booking.car_id a plain string (the mobile app parses it
+// as non-null): car-less walk-in bookings report the zero UUID.
+func carIDString(id *uuid.UUID) string {
+	if id == nil {
+		return uuid.Nil.String()
+	}
+	return id.String()
 }

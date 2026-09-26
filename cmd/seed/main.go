@@ -315,7 +315,7 @@ func seedQueueEntry(
 		Attrs(queue.Queue{
 			Status:           queue.StatusQueue,
 			UserID:           userID,
-			CarID:            carID,
+			CarID:            &carID,
 			ServiceID:        serviceID,
 			PriceOptionID:    priceOptionID,
 			ScheduledStartAt: startAt,
@@ -344,7 +344,7 @@ func verifyOverlapConstraint(
 		overlapping := queue.Queue{
 			Status:           queue.StatusQueue,
 			UserID:           userID,
-			CarID:            carID,
+			CarID:            &carID,
 			ServiceID:        serviceID,
 			PriceOptionID:    priceOptionID,
 			WashingPointID:   washingPointID,

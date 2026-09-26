@@ -12,6 +12,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/auth"
+	"q-wash-api/internal/car"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/service"
 )
@@ -105,7 +106,11 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 
 	items := make([]dayItemResponse, len(rows))
 	for i, row := range rows {
-		u, c := refs.users[row.UserID], refs.cars[row.CarID]
+		u := refs.users[row.UserID]
+		var c car.Car
+		if row.CarID != nil {
+			c = refs.cars[*row.CarID]
+		}
 		item := dayItemResponse{
 			ID:               row.ID.String(),
 			Status:           string(row.Status),
@@ -173,14 +178,14 @@ func (h *Handler) createManual(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	phone := strings.TrimSpace(req.ClientPhone)
-	if err := auth.ValidatePhoneNumber(phone); err != nil {
+	phone, err := auth.NormalizePhoneNumber(req.ClientPhone)
+	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
 	}
 	carName := strings.TrimSpace(req.CarName)
-	if carName == "" || len(carName) > 255 {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_car_name", "car_name is required (max 255 chars)"))
+	if len(carName) > 255 {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_car_name", "car_name is too long (max 255 chars)"))
 		return
 	}
 	plate := strings.TrimSpace(req.Plate)

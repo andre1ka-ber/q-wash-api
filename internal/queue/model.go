@@ -32,18 +32,19 @@ const (
 // both canceled and no_show can be restored to queue by staff (see
 // docs/DATA_MODEL.md).
 type Queue struct {
-	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Status           Status    `gorm:"type:varchar(16);not null;default:queue"`
-	UserID           uuid.UUID `gorm:"type:uuid;not null;index"`
-	CarID            uuid.UUID `gorm:"type:uuid;not null"`
-	ServiceID        uuid.UUID `gorm:"type:uuid;not null"`
-	PriceOptionID    uuid.UUID `gorm:"type:uuid;not null"`
-	WashingPointID   uuid.UUID `gorm:"type:uuid;not null;index"`
-	BoxNumber        int       `gorm:"not null"`
-	ScheduledStartAt time.Time `gorm:"not null"`
-	ScheduledEndAt   time.Time `gorm:"not null"`
-	Notes            *string   `gorm:"type:text"`
-	Source           Source    `gorm:"type:varchar(8);not null;default:app"`
+	ID     uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Status Status    `gorm:"type:varchar(16);not null;default:queue"`
+	UserID uuid.UUID `gorm:"type:uuid;not null;index"`
+	// CarID is nil for walk-in bookings added by staff without any car data.
+	CarID            *uuid.UUID `gorm:"type:uuid"`
+	ServiceID        uuid.UUID  `gorm:"type:uuid;not null"`
+	PriceOptionID    uuid.UUID  `gorm:"type:uuid;not null"`
+	WashingPointID   uuid.UUID  `gorm:"type:uuid;not null;index"`
+	BoxNumber        int        `gorm:"not null"`
+	ScheduledStartAt time.Time  `gorm:"not null"`
+	ScheduledEndAt   time.Time  `gorm:"not null"`
+	Notes            *string    `gorm:"type:text"`
+	Source           Source     `gorm:"type:varchar(8);not null;default:app"`
 	CanceledAt       *time.Time
 	// PausedAt is only meaningful while Status is StatusWashing — toggled
 	// by the worker app's pause/resume actions (docs/PLAN_WEB_APPS.md

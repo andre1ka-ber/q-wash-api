@@ -192,7 +192,7 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		Status:           StatusQueue,
 		Source:           SourceApp,
 		UserID:           in.UserID,
-		CarID:            in.CarID,
+		CarID:            &in.CarID,
 		ServiceID:        in.ServiceID,
 		PriceOptionID:    in.PriceOptionID,
 		WashingPointID:   plan.wp.ID,
@@ -222,8 +222,10 @@ type CreateManualBookingInput struct {
 
 // CreateManualBooking is the cabinet's "Добавить вручную": a staff-created
 // walk-in booking. The client is found-or-created by phone as a regular
-// customer user and gets a fresh car row (name + plate) — created inside
-// the booking's transaction so a lost slot race leaves nothing behind. An
+// customer user, and their car (if any) is upserted — created inside
+// the booking's transaction so a lost slot race leaves nothing behind.
+// Car name/plate are optional; when given, the client's car is upserted
+// (matched by plate, else by name) instead of always creating a new one. An
 // existing account with a non-customer role (staff/worker/admin) is
 // rejected rather than booked against. Always starts in StatusQueue.
 func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookingInput) (*Queue, error) {
@@ -270,15 +272,14 @@ func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookin
 			return apperror.Conflict("active_booking_exists", "this client already has an active booking")
 		}
 
-		c := &car.Car{UserID: u.ID, Name: in.CarName}
-		if in.Plate != "" {
-			plate := in.Plate
-			c.Plate = &plate
+		if in.CarName != "" || in.Plate != "" {
+			c, err := car.NewRepository(tx).UpsertForUser(ctx, u.ID, in.CarName, in.Plate)
+			if err != nil {
+				return err
+			}
+			q.CarID = &c.ID
 		}
-		if err := car.NewRepository(tx).Create(ctx, c); err != nil {
-			return err
-		}
-		q.UserID, q.CarID = u.ID, c.ID
+		q.UserID = u.ID
 		return nil
 	})
 	if err != nil {
