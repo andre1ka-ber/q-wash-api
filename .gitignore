@@ -2,4 +2,5 @@
 .env
 *.log
 /uploads/
+/secrets/
 .claude/settings.local.json
