@@ -15,6 +15,7 @@ import (
 	"q-wash-api/internal/app"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/db"
+	"q-wash-api/internal/platform/monitoring"
 	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
@@ -40,6 +41,16 @@ func run() error {
 
 	for _, w := range cfg.Warnings() {
 		slog.Warn(w)
+	}
+
+	// Production-only, same as the panic-reporting middleware wired in
+	// internal/app (see its own comment) — an empty DSN or a non-production
+	// env both make this a no-op.
+	if cfg.IsProduction() {
+		if err := monitoring.Init(cfg.Monitoring.DSN, cfg.Env); err != nil {
+			return err
+		}
+		defer monitoring.Flush(2 * time.Second)
 	}
 
 	gormLogLevel := gormlogger.Warn

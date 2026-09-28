@@ -10,12 +10,13 @@ import (
 )
 
 type Config struct {
-	Env     string
-	HTTP    HTTPConfig
-	DB      DBConfig
-	Auth    AuthConfig
-	Storage StorageConfig
-	Push    PushConfig
+	Env        string
+	HTTP       HTTPConfig
+	DB         DBConfig
+	Auth       AuthConfig
+	Storage    StorageConfig
+	Push       PushConfig
+	Monitoring MonitoringConfig
 }
 
 type HTTPConfig struct {
@@ -74,6 +75,14 @@ type StorageConfig struct {
 type PushConfig struct {
 	ProjectID          string
 	ServiceAccountJSON []byte
+}
+
+// MonitoringConfig configures Sentry error reporting. Empty DSN means
+// disabled (no-op), same shape as PushConfig. Only ever enabled in
+// production, regardless of whether a DSN happens to be set (see
+// internal/platform/monitoring).
+type MonitoringConfig struct {
+	DSN string
 }
 
 // Dev-only fallbacks for the two signing secrets: convenient locally, fatal
@@ -150,7 +159,8 @@ func Load() (Config, error) {
 			Dir:     getEnv("UPLOADS_DIR", "./uploads"),
 			BaseURL: getEnv("UPLOADS_BASE_URL", "/uploads"),
 		},
-		Push: PushConfig{ProjectID: getEnv("FCM_PROJECT_ID", "")},
+		Push:       PushConfig{ProjectID: getEnv("FCM_PROJECT_ID", "")},
+		Monitoring: MonitoringConfig{DSN: getEnv("SENTRY_DSN", "")},
 	}
 
 	var err error

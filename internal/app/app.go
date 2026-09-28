@@ -45,7 +45,14 @@ import (
 // internally) so tests can pass a spy sender / a temp-dir-backed storage
 // instead of the stdout stub / uploads dir cmd/api uses in dev.
 func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender push.Sender, fileStorage storage.Storage) http.Handler {
-	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins)
+	// Sentry is production-only: an empty DSN here (whether Monitoring.DSN was
+	// never set, or this just isn't a production deploy) makes the middleware
+	// a passthrough.
+	sentryDSN := ""
+	if cfg.IsProduction() {
+		sentryDSN = cfg.Monitoring.DSN
+	}
+	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN)
 	httpserver.MountStatic(router, cfg.Storage.BaseURL, cfg.Storage.Dir)
 
 	jwtManager := jwt.NewManager(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenTTL)

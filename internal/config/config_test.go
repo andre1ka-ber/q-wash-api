@@ -81,3 +81,26 @@ func TestLoadAppliesValidation(t *testing.T) {
 		t.Fatalf("Load with real secrets: %v", err)
 	}
 }
+
+func TestLoadMonitoring(t *testing.T) {
+	t.Run("empty SENTRY_DSN by default", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Monitoring.DSN != "" {
+			t.Fatalf("expected empty DSN by default, got %q", cfg.Monitoring.DSN)
+		}
+	})
+
+	t.Run("reads SENTRY_DSN when set", func(t *testing.T) {
+		t.Setenv("SENTRY_DSN", "https://key@sentry.example/1")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Monitoring.DSN != "https://key@sentry.example/1" {
+			t.Fatalf("expected DSN to be read from env, got %q", cfg.Monitoring.DSN)
+		}
+	})
+}

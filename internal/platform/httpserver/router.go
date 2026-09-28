@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"gorm.io/gorm"
+
+	"q-wash-api/internal/platform/monitoring"
 )
 
 // NewRouter builds the root router with top-level middleware and /health,
@@ -21,13 +23,19 @@ import (
 //
 // corsAllowedOrigins lets a separately-hosted frontend call this API from a
 // browser; pass []string{"*"} to allow any origin (fine for local dev).
-func NewRouter(database *gorm.DB, corsAllowedOrigins []string) (*chi.Mux, chi.Router) {
+//
+// sentryDSN wires monitoring.Middleware right after Recoverer (so it sees
+// the panic while chi.Recoverer, the outer middleware, still sends the 500
+// response) — empty means Sentry is disabled and the middleware is a
+// passthrough.
+func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string) (*chi.Mux, chi.Router) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(monitoring.Middleware(sentryDSN))
 	r.Use(skipTimeoutForSSE(30 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsAllowedOrigins,
