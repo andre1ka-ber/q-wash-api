@@ -89,7 +89,7 @@ func TestWashingPointCredentials(t *testing.T) {
 		})
 	})
 
-	t.Run("only admin can read or reset a point's credentials", func(t *testing.T) {
+	t.Run("staff can read and reset their own point's credentials, not another point's", func(t *testing.T) {
 		created := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
 			"name": "RBAC Wash", "address": "3 Test St", "latitude": 5.0, "longitude": 6.0,
 		})
@@ -97,19 +97,32 @@ func TestWashingPointCredentials(t *testing.T) {
 		env.setWashingPointID(t, staffPhone, wpID)
 		staffAccess := env.reLogin(t, staffPhone)
 
-		if resp := env.do(t, http.MethodGet, "/api/v1/admin/washing-points/"+wpID+"/credentials", staffAccess, nil); resp.status != http.StatusForbidden {
-			t.Errorf("expected 403 for staff reading credentials, got %d (%v)", resp.status, resp.body)
+		otherWP := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+			"name": "Other RBAC Wash", "address": "3b Test St", "latitude": 5.5, "longitude": 6.5,
+		})
+		otherWPID := otherWP.str("id")
+
+		if resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/credentials", "", nil); resp.status != http.StatusUnauthorized {
+			t.Errorf("expected 401 unauthenticated, got %d (%v)", resp.status, resp.body)
 		}
-		if resp := env.do(t, http.MethodPost, "/api/v1/admin/washing-points/"+wpID+"/credentials/staff/reset", staffAccess, nil); resp.status != http.StatusForbidden {
-			t.Errorf("expected 403 for staff resetting credentials, got %d (%v)", resp.status, resp.body)
+		if resp := env.do(t, http.MethodGet, "/api/v1/washing-points/"+otherWPID+"/credentials", staffAccess, nil); resp.status != http.StatusNotFound {
+			t.Errorf("expected 404 for staff reading another point's credentials (IDOR check), got %d (%v)", resp.status, resp.body)
+		}
+		if resp := env.do(t, http.MethodPost, "/api/v1/washing-points/"+otherWPID+"/credentials/staff/reset", staffAccess, nil); resp.status != http.StatusNotFound {
+			t.Errorf("expected 404 for staff resetting another point's credentials, got %d (%v)", resp.status, resp.body)
 		}
 
-		get := env.do(t, http.MethodGet, "/api/v1/admin/washing-points/"+wpID+"/credentials", adminAccess, nil)
+		get := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/credentials", staffAccess, nil)
 		if get.status != http.StatusOK {
-			t.Fatalf("admin get credentials: expected 200, got %d (%v)", get.status, get.body)
+			t.Fatalf("staff get own credentials: expected 200, got %d (%v)", get.status, get.body)
 		}
 		if _, ok := get.body["staff"].(map[string]any)["password"]; ok {
 			t.Error("expected GET credentials to never include a password")
+		}
+
+		adminGet := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/credentials", adminAccess, nil)
+		if adminGet.status != http.StatusOK {
+			t.Fatalf("admin get credentials: expected 200, got %d (%v)", adminGet.status, adminGet.body)
 		}
 	})
 
@@ -128,7 +141,7 @@ func TestWashingPointCredentials(t *testing.T) {
 		}
 		oldRefreshToken, _ := login.body["refresh_token"].(string)
 
-		reset := env.do(t, http.MethodPost, "/api/v1/admin/washing-points/"+wpID+"/credentials/staff/reset", adminAccess, nil)
+		reset := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/credentials/staff/reset", adminAccess, nil)
 		if reset.status != http.StatusOK {
 			t.Fatalf("reset: expected 200, got %d (%v)", reset.status, reset.body)
 		}

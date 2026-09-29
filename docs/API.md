@@ -27,7 +27,7 @@ Token pair response shape (returned by verify/login/refresh):
 
 `washing_point_id` is set only for `staff`/`worker` accounts (which point they're scoped to); omitted (`null`) for `customer`/`admin`. Added so staff-facing apps (e.g. `q-wash-cabinet`) can discover their own point without a point-picker UI. `phone_number` is omitted for `staff`/`worker`/`admin` accounts — only customers have one (see `docs/DATA_MODEL.md`'s `User` entry).
 
-There is no API endpoint to set an arbitrary username for a user — same as role promotion, that's a direct-DB operation by design (see `docs/DATA_MODEL.md`). Every washing point's staff/worker accounts are auto-provisioned on creation instead (see "Washing point credentials" below), and their password can be reset (not their username) via the admin credential-reset endpoint. `cmd/seed` separately sets dev-only credentials for the seeded admin account.
+There is no API endpoint to set an arbitrary username for a user — same as role promotion, that's a direct-DB operation by design (see `docs/DATA_MODEL.md`). Every washing point's staff/worker accounts are auto-provisioned on creation instead (see "Washing point credentials" below), and their password can be reset (not their username) via the credential-reset endpoint (their own point's staff, or admin). `cmd/seed` separately sets dev-only credentials for the seeded admin account.
 Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, verified statelessly (no DB hit) by `auth.RequireAuth` middleware. Refresh tokens are opaque random strings, stored HMAC-hashed, never JWTs — so individual sessions can be revoked. Role-gated routes (Phase 4+) use `auth.RequireRole("staff", "admin")` chained after `RequireAuth`.
 
 ## Users — implemented (Phase 3)
@@ -117,8 +117,8 @@ If it's lost, use the reset endpoint below to issue a new one.
 
 | method | path | role | notes |
 |---|---|---|---|
-| GET | `/admin/washing-points/{id}/credentials` | admin | `{staff: {username}, worker: {username}}` — usernames only, no passwords, for display (e.g. the cabinet/edit-point drawer). |
-| POST | `/admin/washing-points/{id}/credentials/{role}/reset` | admin | `{role}` is `staff` or `worker`. Regenerates that account's password and revokes all of its existing refresh tokens (any active session must log in again with the new password). Returns `{username, password}` once, same shape/one-time-visibility as creation. 400 `invalid_role` if `{role}` isn't `staff`/`worker`; 404 `user_not_found` if the point has no such account (shouldn't happen for a point created after this feature landed). |
+| GET | `/washing-points/{id}/credentials` | staff, admin | `{staff: {username}, worker: {username}}` — usernames only, no passwords, for display (q-wash-admin's edit-point drawer, q-wash-cabinet's "Безопасность" tab). Staff may only read their own point's — 404 `washing_point_not_found` for any other, same as `PATCH`/`DELETE /washing-points/{id}`; admin has no such restriction. Never public, unlike `GET .../photos`/`.../schedule`. |
+| POST | `/washing-points/{id}/credentials/{role}/reset` | staff, admin | `{role}` is `staff` or `worker`. Regenerates that account's password and revokes all of its existing refresh tokens (any active session must log in again with the new password). Returns `{username, password}` once, same shape/one-time-visibility as creation. Same own-point-only restriction on staff as the `GET` above. 400 `invalid_role` if `{role}` isn't `staff`/`worker`; 404 `user_not_found` if the point has no such account (shouldn't happen for a point created after this feature landed). |
 
 ### Boxes — implemented (`docs/PLAN_WEB_APPS.md` phase 6)
 

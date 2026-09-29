@@ -76,7 +76,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender 
 	boxManager := box.NewManager(boxRepo)
 	boxHandler := box.NewHandler(boxRepo, boxManager, queueBus)
 
-	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager, boxManager)
+	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager, boxManager, userRepo, authRepo)
 
 	serviceRepo := service.NewRepository(database)
 	serviceManager := service.NewManager(serviceRepo)
@@ -108,7 +108,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender 
 	photoManager := photo.NewManager(photoRepo, fileStorage)
 	photoHandler := photo.NewHandler(photoRepo, photoManager, wpRepo)
 
-	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo, userRepo, authRepo)
+	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo)
 
 	qrCodeRepo := qrcode.NewRepository(database)
 	qrCodeManager := qrcode.NewManager(qrCodeRepo, wpRepo, queueRepo)

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/auth"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/user"
 )
@@ -37,16 +38,21 @@ type Handler struct {
 	repo           *Repository
 	scheduleSeeder ScheduleSeeder
 	boxSeeder      BoxSeeder
+	userRepo       *user.Repository
+	authRepo       *auth.Repository
 }
 
-func NewHandler(repo *Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder) *Handler {
-	return &Handler{repo: repo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder}
+func NewHandler(repo *Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder, userRepo *user.Repository, authRepo *auth.Repository) *Handler {
+	return &Handler{repo: repo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder, userRepo: userRepo, authRepo: authRepo}
 }
 
 // RegisterRoutes mounts /washing-points: reads are public, writes require
 // requireManage (typically RequireAuth + RequireRole(staff, admin)) applied
 // per-method via chi's With(), since chi doesn't allow mounting the same
-// path prefix from two separate route groups.
+// path prefix from two separate route groups. The credentials routes are
+// staff/admin-only reads (never public, unlike photos/schedule) — staff is
+// further restricted to their own point inside the handler, same pattern
+// as update/deactivate below.
 func (h *Handler) RegisterRoutes(r chi.Router, requireManage ...func(http.Handler) http.Handler) {
 	r.Route("/washing-points", func(wp chi.Router) {
 		wp.Get("/", h.list)
@@ -55,6 +61,9 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireManage ...func(http.Handle
 		wp.With(requireManage...).Post("/", h.create)
 		wp.With(requireManage...).Patch("/{id}", h.update)
 		wp.With(requireManage...).Delete("/{id}", h.deactivate)
+
+		wp.With(requireManage...).Get("/{id}/credentials", h.getCredentials)
+		wp.With(requireManage...).Post("/{id}/credentials/{role}/reset", h.resetCredentials)
 	})
 }
 
@@ -389,6 +398,107 @@ func (h *Handler) deactivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type credentialUsernameResponse struct {
+	Username string `json:"username"`
+}
+
+type credentialsResponse struct {
+	Staff  credentialUsernameResponse `json:"staff"`
+	Worker credentialUsernameResponse `json:"worker"`
+}
+
+// getCredentials returns the usernames (never passwords — those are only
+// ever visible once, at creation or reset) of a point's auto-provisioned
+// staff/worker accounts. Staff may only read their own point's — 404 for
+// any other, same as update/deactivate above; admin has no such
+// restriction.
+func (h *Handler) getCredentials(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := httputil.AuthUser(w, r)
+	if !ok {
+		return
+	}
+
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(id) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	staff, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleStaff)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	worker, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleWorker)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{
+		Staff:  credentialUsernameResponse{Username: *staff.Username},
+		Worker: credentialUsernameResponse{Username: *worker.Username},
+	})
+}
+
+// resetCredentials regenerates a single account's password (role is
+// "staff" or "worker") and revokes its existing refresh tokens, so the old
+// session can't keep going after the password's been handed to someone
+// else. The new plaintext password is returned once, same as at creation.
+// Same own-point-only restriction on staff as getCredentials.
+func (h *Handler) resetCredentials(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := httputil.AuthUser(w, r)
+	if !ok {
+		return
+	}
+
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(id) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	var role user.Role
+	switch chi.URLParam(r, "role") {
+	case "staff":
+		role = user.RoleStaff
+	case "worker":
+		role = user.RoleWorker
+	default:
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_role", "role must be staff or worker"))
+		return
+	}
+
+	u, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, role)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	plaintext, err := user.ResetPassword(r.Context(), h.userRepo, u)
+	if err != nil {
+		httputil.WriteError(w, r, apperror.Internal(err))
+		return
+	}
+	if err := h.authRepo.RevokeAllRefreshTokensForUser(r.Context(), u.ID); err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, CredentialResponse{
+		Username: *u.Username,
+		Password: plaintext,
+	})
 }
 
 func isValidStatus(s Status) bool {

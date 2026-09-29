@@ -301,3 +301,29 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
     (`NewPointDrawer`/`EditPointDrawer`/`ConnectionRequestsPage` all
     surface the new one-time credentials reveal via a new shared
     `CredentialsRevealModal`) — see those repos' own `PROGRESS.md`.
+- 2026-09-29 (same day) — **Moved the credentials endpoints off `/admin/*`,
+  onto the point itself**: `q-wash-cabinet` (a staff/worker account, never
+  admin) needed its own "Безопасность" tab to view/reset its point's
+  credentials, and `/admin/*` is admin-role-gated by design (see
+  `internal/admin`'s own package doc) — never reachable by staff. Moved
+  `GET/POST /washing-points/{id}/credentials...` into
+  `internal/washingpoint.Handler` (was `internal/admin.Handler`), gated by
+  the same `requireManage` (staff+admin) chain every other
+  `/washing-points/{id}/...` write already uses, with an
+  `authUser.OwnsWashingPoint` check inside each handler — same
+  own-point-only pattern as `PATCH`/`DELETE /washing-points/{id}` — so
+  staff can now read/reset only their own point's credentials (404 for any
+  other point), admin any point. `internal/admin.Handler` dropped its now
+  unused `userRepo`/`authRepo` fields. Docs (`API.md`, `openapi.yaml`)
+  moved from the Admin section to Washing points. Rewrote
+  `credentials_test.go`'s RBAC case: was "staff forbidden" (403), now
+  "staff can act on their own point, 404 on another's, admin any point" —
+  added an IDOR check (staff hitting a different point's credentials) that
+  didn't exist before. `q-wash-shared`'s API wrappers now call
+  `/washing-points/{id}/credentials...` instead of
+  `/admin/washing-points/{id}/credentials...` (q-wash-admin's existing
+  usage keeps working unchanged — admin still has no ownership
+  restriction). `go build ./...`, `go vet ./...`, full non-integration
+  unit suite, and `go build -tags=integration ./...`/`go vet
+  -tags=integration ./...` all clean; the integration test itself still
+  can't run for the same reason as above (migration `000025` pending).

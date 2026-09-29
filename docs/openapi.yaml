@@ -347,6 +347,66 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/washing-points/{id}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Washing points]
+      operationId: getWashingPointCredentials
+      summary: Get a washing point's staff/worker login usernames
+      description: >
+        Requires role staff or admin. Usernames only — passwords are never
+        retrievable after the one-time reveal at creation/reset (see
+        docs/API.md's "Washing point credentials"). Staff may only read
+        their own point's — 404 for any other, same as PATCH/DELETE
+        /washing-points/{id}; admin has no such restriction. Never public,
+        unlike GET .../photos or .../schedule.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  staff: { type: object, properties: { username: { type: string } }, required: [username] }
+                  worker: { type: object, properties: { username: { type: string } }, required: [username] }
+                required: [staff, worker]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/credentials/{role}/reset:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+      - name: role
+        in: path
+        required: true
+        schema: { type: string, enum: [staff, worker] }
+    post:
+      tags: [Washing points]
+      operationId: resetWashingPointCredentials
+      summary: Regenerate a washing point's staff or worker password
+      description: >
+        Requires role staff or admin. Generates a new random password for
+        that account and revokes all of its existing refresh tokens (any
+        active session must log in again with the new password). Returns
+        the new plaintext password once — same one-time-visibility as
+        creation. Same own-point-only restriction on staff as the GET
+        above.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Credential" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/availability:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -1857,62 +1917,6 @@ paths:
               schema: { $ref: "#/components/schemas/AdminWashingPointList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-
-  /api/v1/admin/washing-points/{id}/credentials:
-    parameters:
-      - $ref: "#/components/parameters/washingPointId"
-    get:
-      tags: [Admin]
-      operationId: getWashingPointCredentials
-      summary: Get a washing point's staff/worker login usernames
-      description: >
-        Requires role admin. Usernames only — passwords are never
-        retrievable after the one-time reveal at creation/reset (see
-        docs/API.md's "Washing point credentials").
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  staff: { type: object, properties: { username: { type: string } }, required: [username] }
-                  worker: { type: object, properties: { username: { type: string } }, required: [username] }
-                required: [staff, worker]
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /api/v1/admin/washing-points/{id}/credentials/{role}/reset:
-    parameters:
-      - $ref: "#/components/parameters/washingPointId"
-      - name: role
-        in: path
-        required: true
-        schema: { type: string, enum: [staff, worker] }
-    post:
-      tags: [Admin]
-      operationId: resetWashingPointCredentials
-      summary: Regenerate a washing point's staff or worker password
-      description: >
-        Requires role admin. Generates a new random password for that
-        account and revokes all of its existing refresh tokens (any
-        active session must log in again with the new password). Returns
-        the new plaintext password once — same one-time-visibility as
-        creation.
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Credential" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/admin/stats:
     get:
