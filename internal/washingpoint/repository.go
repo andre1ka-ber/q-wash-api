@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/user"
 )
 
 type Repository struct {
@@ -65,6 +66,26 @@ func (r *Repository) Create(ctx context.Context, wp *WashingPoint) error {
 		return apperror.Internal(err)
 	}
 	return nil
+}
+
+// CreateWithAccounts creates wp and provisions its staff+worker login
+// accounts (user.ProvisionPointAccounts) in one transaction, so a point
+// never ends up committed without its accounts (or vice versa) if either
+// half fails.
+func (r *Repository) CreateWithAccounts(ctx context.Context, wp *WashingPoint) (user.PointAccounts, error) {
+	var accounts user.PointAccounts
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(wp).Error; err != nil {
+			return err
+		}
+		var err error
+		accounts, err = user.ProvisionPointAccounts(ctx, tx, wp.ID, wp.Name)
+		return err
+	})
+	if err != nil {
+		return user.PointAccounts{}, apperror.Internal(err)
+	}
+	return accounts, nil
 }
 
 func (r *Repository) Update(ctx context.Context, wp *WashingPoint) error {

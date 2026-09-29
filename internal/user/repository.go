@@ -68,6 +68,23 @@ func (r *Repository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]User, er
 	return users, nil
 }
 
+// FindByWashingPointAndRole finds the one staff or worker account scoped
+// to washingPointID (internal/admin's credentials get/reset endpoints —
+// there's exactly one of each per point, see user.ProvisionPointAccounts).
+func (r *Repository) FindByWashingPointAndRole(ctx context.Context, washingPointID uuid.UUID, role Role) (*User, error) {
+	var u User
+	err := r.db.WithContext(ctx).
+		Where("washing_point_id = ? AND role = ?", washingPointID, role).
+		First(&u).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, apperror.NotFound("user_not_found", "user not found")
+	}
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return &u, nil
+}
+
 func (r *Repository) Create(ctx context.Context, u *User) error {
 	if err := r.db.WithContext(ctx).Create(u).Error; err != nil {
 		return apperror.Internal(err)

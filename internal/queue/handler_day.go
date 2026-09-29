@@ -122,7 +122,7 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 			PausedAt:         row.PausedAt,
 			Source:           string(row.Source),
 			CarName:          c.Name,
-			ClientPhone:      u.PhoneNumber,
+			ClientPhone:      u.PhoneOrEmpty(),
 			ServiceName:      refs.serviceName(row.ServiceID),
 			PriceOptionName:  optionByID[row.PriceOptionID].Name,
 			PriceCents:       optionByID[row.PriceOptionID].PriceCents,

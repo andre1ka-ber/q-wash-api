@@ -9,6 +9,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/washingpoint"
 )
 
 type Handler struct {
@@ -43,6 +44,15 @@ type response struct {
 	ReviewedBy   *string    `json:"reviewed_by,omitempty"`
 	ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+}
+
+// approveResponse is only ever returned by the approve branch of
+// updateStatus — the one moment the newly-provisioned washing point's
+// staff/worker passwords exist in plaintext anywhere (see
+// washingpoint.createResponse's doc comment; same reasoning applies here).
+type approveResponse struct {
+	response
+	Credentials washingpoint.AccountsResponse `json:"credentials"`
 }
 
 func toResponse(c *ConnectionRequest) response {
@@ -183,12 +193,15 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 
 	switch Status(req.Status) {
 	case StatusApproved:
-		c, _, err := h.manager.Approve(r.Context(), id, authUser.ID)
+		c, _, accounts, err := h.manager.Approve(r.Context(), id, authUser.ID)
 		if err != nil {
 			httputil.WriteError(w, r, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusOK, toResponse(c))
+		httputil.WriteJSON(w, http.StatusOK, approveResponse{
+			response:    toResponse(c),
+			Credentials: washingpoint.ToAccountsResponse(accounts),
+		})
 	case StatusRejected:
 		c, err := h.manager.Reject(r.Context(), id, authUser.ID)
 		if err != nil {

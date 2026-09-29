@@ -13,21 +13,24 @@ Update this file whenever a model or relationship changes.
 ## Entities
 
 ### User
-Customers authenticate via phone + OTP, no password. Staff/admin *additionally* have an optional username + password (see below) for the queue board and staff panel, which shouldn't run a phone-OTP flow.
+Customers authenticate via phone + OTP, no password. Staff/admin/worker
+authenticate via username + password (see below) instead — they never had
+any real use for a phone number, only for the queue board and staff panel,
+which shouldn't run a phone-OTP flow.
 
 | field | type | notes |
 |---|---|---|
 | id | uuid | PK |
-| phone_number | string | unique, E.164 format, indexed |
+| phone_number | string, nullable | unique, E.164 format, indexed. NULL for `staff`/`worker`/`admin` (migration `000025` dropped the old blanket NOT NULL — see below); enforced non-null for `customer` at the application layer instead, since the OTP registration path always supplies one. Postgres unique indexes permit multiple NULLs, so no partial index is needed. |
 | name | string, nullable | optional display name |
 | role | enum: `customer`, `staff`, `admin`, `worker` | default `customer`. `staff`/`admin` can manage washing points/services and advance queue status. `worker` (added for the shift-technician web app, see `PLAN_WEB_APPS.md`) logs in the same way staff/admin do; gated into the per-point live surface (queue board, status, pause/resume, live-boxes) via `requireQueueOps`, but not `requireStaff` (washing-point/service/photo/schedule/box management, network-wide `GET /queue`). |
 | washing_point_id | uuid, nullable | FK -> WashingPoint. Scopes a `staff`/`worker` account to the one point they work at; always NULL for `admin` (network-wide) and `customer`. Added for the multi-point web apps, see `PLAN_WEB_APPS.md`. |
 | last_login_at | timestamp, nullable | updated on successful OTP verify or password login |
-| username | string, nullable, unique | only set for staff/admin; NULL for customers. Postgres unique indexes permit multiple NULLs, so no partial index is needed. |
+| username | string, nullable, unique | only set for staff/worker/admin; NULL for customers. Postgres unique indexes permit multiple NULLs, so no partial index is needed. |
 | password_hash | string, nullable | bcrypt hash; NULL for customers |
 | created_at / updated_at | timestamp | |
 
-> Deliberately kept as nullable columns on `users` rather than a separate `staff_credentials` table: staff/admin already need a full `User` row regardless (they can book their own washes, appear in `queue.user_id`, receive notifications, etc.), so a separate table would only relocate two columns while adding a join everywhere a staff identity is resolved — no real normalization benefit at this scale. There is no API endpoint to set username/password (same reasoning as role promotion below): `cmd/seed` sets dev-only credentials directly via the DB for the seeded admin/staff accounts.
+> Deliberately kept as nullable columns on `users` rather than a separate `staff_credentials` table: staff/admin already need a full `User` row regardless (they can book their own washes, appear in `queue.user_id`, receive notifications, etc.), so a separate table would only relocate two columns while adding a join everywhere a staff identity is resolved — no real normalization benefit at this scale. There is no API endpoint to set an arbitrary username (same reasoning as role promotion below): `cmd/seed` sets dev-only credentials directly via the DB for the seeded admin account. Every washing point's staff/worker accounts, though, are auto-provisioned by `user.ProvisionPointAccounts` when the point is created (`POST /washing-points` or connection-request approval, see `docs/API.md`'s "Washing point credentials") — the one path that *does* create real username+password accounts without going through `cmd/seed`, and the reason `phone_number` needed to become nullable at all.
 
 ### OtpCode
 Short-lived one-time codes for login. Not exposed via API beyond request/verify.

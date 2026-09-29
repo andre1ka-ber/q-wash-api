@@ -265,7 +265,9 @@ paths:
         Requires role `admin`. Staff get 403 — creating a point directly
         bypasses the connection-request onboarding flow, so it's reserved
         for admin; staff go through `POST /connection-requests` + approval
-        instead.
+        instead. Also auto-provisions the point's staff+worker logins
+        (see PointAccounts) — the response's `credentials` field is the
+        only place either password is ever visible in plaintext.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -277,7 +279,13 @@ paths:
           description: Created
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/WashingPoint" }
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/WashingPoint"
+                  - type: object
+                    properties:
+                      credentials: { $ref: "#/components/schemas/PointAccounts" }
+                    required: [credentials]
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1570,7 +1578,11 @@ paths:
         if any) and a WashingPoint with status=pending_review and
         placeholder latitude/longitude of 0,0 (the request doesn't collect
         coordinates) — an admin must set them via PATCH
-        /washing-points/{id} before the point can go live.
+        /washing-points/{id} before the point can go live. Approving (not
+        rejecting) also auto-provisions the new point's staff+worker
+        logins, same as POST /washing-points — the response's
+        `credentials` field (present only on approve) is the only place
+        either password is ever visible in plaintext.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1582,7 +1594,12 @@ paths:
           description: Reviewed
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ConnectionRequest" }
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ConnectionRequest"
+                  - type: object
+                    properties:
+                      credentials: { $ref: "#/components/schemas/PointAccounts" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1841,6 +1858,62 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/v1/admin/washing-points/{id}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Admin]
+      operationId: getWashingPointCredentials
+      summary: Get a washing point's staff/worker login usernames
+      description: >
+        Requires role admin. Usernames only — passwords are never
+        retrievable after the one-time reveal at creation/reset (see
+        docs/API.md's "Washing point credentials").
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  staff: { type: object, properties: { username: { type: string } }, required: [username] }
+                  worker: { type: object, properties: { username: { type: string } }, required: [username] }
+                required: [staff, worker]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/washing-points/{id}/credentials/{role}/reset:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+      - name: role
+        in: path
+        required: true
+        schema: { type: string, enum: [staff, worker] }
+    post:
+      tags: [Admin]
+      operationId: resetWashingPointCredentials
+      summary: Regenerate a washing point's staff or worker password
+      description: >
+        Requires role admin. Generates a new random password for that
+        account and revokes all of its existing refresh tokens (any
+        active session must log in again with the new password). Returns
+        the new plaintext password once — same one-time-visibility as
+        creation.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Credential" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/admin/stats:
     get:
       tags: [Admin]
@@ -1945,12 +2018,12 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        phone_number: { type: string, example: "+15551234567" }
+        phone_number: { type: string, nullable: true, example: "+15551234567", description: "Omitted/null for staff, worker, and admin accounts — only customers have one." }
         name: { type: string, nullable: true }
         role: { type: string, enum: [customer, staff, admin, worker] }
         washing_point_id: { type: string, format: uuid, nullable: true }
         last_login_at: { type: string, format: date-time, nullable: true }
-      required: [id, phone_number, role]
+      required: [id, role]
 
     TokenPair:
       type: object
@@ -1984,6 +2057,25 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/WashingPoint" } }
       required: [items]
+
+    Credential:
+      type: object
+      properties:
+        username: { type: string }
+        password: { type: string }
+      required: [username, password]
+
+    PointAccounts:
+      type: object
+      description: >
+        A washing point's auto-provisioned staff+worker logins, plaintext
+        password included. Only ever appears in the response that just
+        created them (POST /washing-points, or approving a connection
+        request) — never retrievable again afterward.
+      properties:
+        staff: { $ref: "#/components/schemas/Credential" }
+        worker: { $ref: "#/components/schemas/Credential" }
+      required: [staff, worker]
 
     WashingPointCreate:
       type: object

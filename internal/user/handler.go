@@ -29,7 +29,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 type response struct {
 	ID             string     `json:"id"`
-	PhoneNumber    string     `json:"phone_number"`
+	PhoneNumber    *string    `json:"phone_number,omitempty"`
 	Name           *string    `json:"name,omitempty"`
 	Role           string     `json:"role"`
 	WashingPointID *string    `json:"washing_point_id,omitempty"`

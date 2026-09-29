@@ -8,6 +8,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/owner"
+	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -49,25 +50,25 @@ func NewManager(repo *Repository, ownerRepo *owner.Repository, wpRepo *washingpo
 	return &Manager{repo: repo, ownerRepo: ownerRepo, wpRepo: wpRepo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder}
 }
 
-func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*ConnectionRequest, *washingpoint.WashingPoint, error) {
+func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*ConnectionRequest, *washingpoint.WashingPoint, user.PointAccounts, error) {
 	cr, err := m.repo.FindByID(ctx, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, user.PointAccounts{}, err
 	}
 	if cr.Status != StatusNew {
-		return nil, nil, apperror.Conflict("connection_request_already_reviewed", "connection request has already been reviewed")
+		return nil, nil, user.PointAccounts{}, apperror.Conflict("connection_request_already_reviewed", "connection request has already been reviewed")
 	}
 
 	own, err := m.ownerRepo.FindByPhone(ctx, cr.ContactPhone)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, user.PointAccounts{}, err
 	}
 	if own == nil {
 		contactName := cr.ContactName
 		contactPhone := cr.ContactPhone
 		own = &owner.Owner{Name: cr.BusinessName, ContactName: &contactName, ContactPhone: &contactPhone}
 		if err := m.ownerRepo.Create(ctx, own); err != nil {
-			return nil, nil, err
+			return nil, nil, user.PointAccounts{}, err
 		}
 	}
 
@@ -80,14 +81,18 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 		CloseTime:  "20:00",
 		Status:     washingpoint.StatusPendingReview,
 	}
-	if err := m.wpRepo.Create(ctx, wp); err != nil {
-		return nil, nil, err
+	// CreateWithAccounts also provisions the point's staff+worker logins
+	// (same call washingpoint.Handler.create uses), atomically with the
+	// point row — see its own doc comment.
+	accounts, err := m.wpRepo.CreateWithAccounts(ctx, wp)
+	if err != nil {
+		return nil, nil, user.PointAccounts{}, err
 	}
 	if err := m.scheduleSeeder.SeedDefault(ctx, wp.ID, wp.OpenTime, wp.CloseTime); err != nil {
-		return nil, nil, apperror.Internal(err)
+		return nil, nil, user.PointAccounts{}, apperror.Internal(err)
 	}
 	if err := m.boxSeeder.SeedDefault(ctx, wp.ID, wp.BoxesCount); err != nil {
-		return nil, nil, apperror.Internal(err)
+		return nil, nil, user.PointAccounts{}, apperror.Internal(err)
 	}
 
 	now := time.Now()
@@ -95,9 +100,9 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 	cr.ReviewedBy = &reviewerID
 	cr.ReviewedAt = &now
 	if err := m.repo.Update(ctx, cr); err != nil {
-		return nil, nil, err
+		return nil, nil, user.PointAccounts{}, err
 	}
-	return cr, wp, nil
+	return cr, wp, accounts, nil
 }
 
 func (m *Manager) Reject(ctx context.Context, id, reviewerID uuid.UUID) (*ConnectionRequest, error) {

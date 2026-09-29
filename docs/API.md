@@ -25,9 +25,9 @@ Token pair response shape (returned by verify/login/refresh):
 }
 ```
 
-`washing_point_id` is set only for `staff`/`worker` accounts (which point they're scoped to); omitted (`null`) for `customer`/`admin`. Added so staff-facing apps (e.g. `q-wash-cabinet`) can discover their own point without a point-picker UI.
+`washing_point_id` is set only for `staff`/`worker` accounts (which point they're scoped to); omitted (`null`) for `customer`/`admin`. Added so staff-facing apps (e.g. `q-wash-cabinet`) can discover their own point without a point-picker UI. `phone_number` is omitted for `staff`/`worker`/`admin` accounts — only customers have one (see `docs/DATA_MODEL.md`'s `User` entry).
 
-There is no API endpoint to *set* a username/password for a user — same as role promotion, it's a direct-DB operation by design (see `docs/DATA_MODEL.md`). `cmd/seed` sets dev-only credentials for the seeded admin/staff accounts (see its output).
+There is no API endpoint to set an arbitrary username for a user — same as role promotion, that's a direct-DB operation by design (see `docs/DATA_MODEL.md`). Every washing point's staff/worker accounts are auto-provisioned on creation instead (see "Washing point credentials" below), and their password can be reset (not their username) via the admin credential-reset endpoint. `cmd/seed` separately sets dev-only credentials for the seeded admin account.
 Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, verified statelessly (no DB hit) by `auth.RequireAuth` middleware. Refresh tokens are opaque random strings, stored HMAC-hashed, never JWTs — so individual sessions can be revoked. Role-gated routes (Phase 4+) use `auth.RequireRole("staff", "admin")` chained after `RequireAuth`.
 
 ## Users — implemented (Phase 3)
@@ -43,7 +43,7 @@ Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, ve
 |---|---|---|---|
 | GET | `/washing-points` | public | `{items: [...]}`, all points (any status), ordered by name |
 | GET | `/washing-points/{id}` | public | detail; 404 `washing_point_not_found` |
-| POST | `/washing-points` | admin | body: `{name, address, latitude, longitude, boxes_count?, open_time?, close_time?, owner_id?, status?, description?, amenities?}`. Defaults: `boxes_count=2`, `open_time="08:00"`, `close_time="20:00"`, `status="active"` (accepts any valid status if given, e.g. to create directly into `pending_review`). Admin-only (403 for staff) — creating a point directly bypasses the connection-request onboarding flow, so it's reserved for admin; staff go through `POST /connection-requests` + approval instead. |
+| POST | `/washing-points` | admin | body: `{name, address, latitude, longitude, boxes_count?, open_time?, close_time?, owner_id?, status?, description?, amenities?}`. Defaults: `boxes_count=2`, `open_time="08:00"`, `close_time="20:00"`, `status="active"` (accepts any valid status if given, e.g. to create directly into `pending_review`). Admin-only (403 for staff) — creating a point directly bypasses the connection-request onboarding flow, so it's reserved for admin; staff go through `POST /connection-requests` + approval instead. Response includes a one-time `credentials` object — see "Washing point credentials" below. |
 | PATCH | `/washing-points/{id}` | staff, admin | any subset of the create fields (`owner_id`/`description`/`amenities` included) plus `status` (`active`/`paused`/`pending_review`, 400 `invalid_status` otherwise); re-validates the resulting record (e.g. `close_time > open_time`). `owner_id: ""` clears it. Staff may only act on their own point (`User.washing_point_id`) — 404 `washing_point_not_found` for any other point, same as a nonexistent id. Admin has no such restriction. |
 | DELETE | `/washing-points/{id}` | staff, admin | sets `status=paused` (no row deletion); 204. Same own-point-only restriction on staff as PATCH. |
 | GET | `/washing-points/{id}/availability` | public | query: `service_id` (uuid), `date` (`YYYY-MM-DD`, interpreted as a calendar day in the business timezone, see below). Returns `{items: [{start, end, available_boxes}, ...]}`, RFC3339 timestamps (absolute instants — clients should convert to local time for display, not string-match), stepped every 15 minutes across that date's resolved schedule window(s) (see "Per-weekday schedule" below) — two disjoint windows on a day with a break, none on a closed day. A slot appears only if the service's `duration_minutes` fits before the window's close and at least one box is free (and open — see "Boxes" below) for the whole `[start, end)`; `available_boxes` lists which specific box numbers those are, so the client can offer a box choice rather than the server picking one. A box closed via `PATCH .../boxes/{boxId}` never appears in `available_boxes`, treated as booked for the whole day rather than changing the sweep-line algorithm itself. 400 `invalid_service_id`/`invalid_date`; 400 `service_not_at_washing_point` if the service belongs to a different washing point; 404 if the washing point or service doesn't exist. Algorithm: `internal/queue/availability.go` (`ComputeAvailableSlotsWithBoxes`/`ComputeAvailableSlotsForDay`, unit tested in `availability_test.go`). |
@@ -88,6 +88,37 @@ inverted, or outside `open_time`–`close_time`).
 Validation errors: `invalid_name`, `invalid_address`, `invalid_latitude` (±90), `invalid_longitude` (±180), `invalid_boxes_count` (≥1), `invalid_open_time`/`invalid_close_time` (`HH:MM` 24h), `invalid_hours` (`close_time` must be after `open_time`), `invalid_owner_id` (uuid parse), `invalid_status` — all 400.
 
 Response (`GET`/`POST`/`PATCH /washing-points...`): `owner_id`, `description` and `amenities` are omitted from the JSON body when unset (`null`/empty), rather than sent as `null`/`[]`.
+
+### Washing point credentials — implemented
+
+Every washing point gets a `staff` and a `worker` login (`internal/user`'s
+`ProvisionPointAccounts`), created atomically with the point row (whichever
+of `POST /washing-points` or connection-request approval created it) —
+customers use phone+OTP, but staff/worker/admin all authenticate via
+`POST /auth/login`, so a new point needs accounts to actually be usable by
+anyone. Username is derived from the point's name (lowercased, ASCII,
+hyphenated; a numeric `-2`/`-3`/... suffix on collision — checked
+network-wide, not just within that point); the worker account's username
+is the same base plus `-worker`. Password is a random 16-character string
+(no `0/O/1/l/I`, chosen to be readable off a screen).
+
+Both `POST /washing-points` and the connection-request approval response
+(`PATCH /connection-requests/{id}` with `status: "approved"`, see below)
+include a one-time `credentials` object:
+```json
+{"credentials": {
+  "staff":  {"username": "pegasus-detailing", "password": "..."},
+  "worker": {"username": "pegasus-detailing-worker", "password": "..."}
+}}
+```
+This is the **only** moment either password is ever visible in plaintext —
+only the bcrypt hash is stored, and no endpoint anywhere returns it again.
+If it's lost, use the reset endpoint below to issue a new one.
+
+| method | path | role | notes |
+|---|---|---|---|
+| GET | `/admin/washing-points/{id}/credentials` | admin | `{staff: {username}, worker: {username}}` — usernames only, no passwords, for display (e.g. the cabinet/edit-point drawer). |
+| POST | `/admin/washing-points/{id}/credentials/{role}/reset` | admin | `{role}` is `staff` or `worker`. Regenerates that account's password and revokes all of its existing refresh tokens (any active session must log in again with the new password). Returns `{username, password}` once, same shape/one-time-visibility as creation. 400 `invalid_role` if `{role}` isn't `staff`/`worker`; 404 `user_not_found` if the point has no such account (shouldn't happen for a point created after this feature landed). |
 
 ### Boxes — implemented (`docs/PLAN_WEB_APPS.md` phase 6)
 
@@ -395,7 +426,9 @@ Approving (`status: "approved"`) creates an `Owner` (reusing one whose
 the request doesn't collect coordinates, so an admin must set them via
 `PATCH /washing-points/{id}` before the point can go live. Rejecting just
 sets `status = rejected`; neither action is reversible through this
-endpoint.
+endpoint. The approve response also includes the new point's one-time
+`credentials` object — see "Washing point credentials" above; same
+provisioning call `POST /washing-points` uses.
 
 Validation: 400 `invalid_name` (owners); `invalid_business_name`/
 `invalid_contact_name`/`invalid_contact_phone`/`invalid_address`/

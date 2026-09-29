@@ -60,7 +60,7 @@ type rowRefs struct {
 	services map[uuid.UUID]service.Service
 }
 
-func (r *rowRefs) phone(id uuid.UUID) string { return r.users[id].PhoneNumber }
+func (r *rowRefs) phone(id uuid.UUID) string { return r.users[id].PhoneOrEmpty() }
 func (r *rowRefs) carName(id *uuid.UUID) string {
 	if id == nil {
 		return ""

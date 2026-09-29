@@ -20,10 +20,18 @@ const (
 )
 
 type User struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
-	PhoneNumber string    `gorm:"type:varchar(32);uniqueIndex;not null"`
-	Name        *string   `gorm:"type:varchar(255)"`
-	Role        Role      `gorm:"type:varchar(16);not null;default:customer"`
+	ID uuid.UUID `gorm:"type:uuid;primaryKey"`
+	// PhoneNumber is nil for staff/worker/admin accounts (they authenticate
+	// by Username/PasswordHash instead, see below) — only customers ever
+	// have one. Enforced at the application layer (customer creation always
+	// supplies one); the DB only enforces uniqueness among the phones that
+	// do exist (migration 000025 dropped the old blanket NOT NULL, which
+	// predates the worker/admin username+password login path and would
+	// otherwise force every staff/worker row to fight over a shared ""
+	// value).
+	PhoneNumber *string `gorm:"type:varchar(32);uniqueIndex"`
+	Name        *string `gorm:"type:varchar(255)"`
+	Role        Role    `gorm:"type:varchar(16);not null;default:customer"`
 	// WashingPointID scopes a staff/worker account to the one point they
 	// work at; always nil for admin (network-wide) and customer.
 	WashingPointID *uuid.UUID `gorm:"type:uuid;index"`
@@ -38,6 +46,17 @@ type User struct {
 }
 
 func (User) TableName() string { return "users" }
+
+// PhoneOrEmpty returns PhoneNumber dereferenced, or "" for a staff/worker/
+// admin account that has none — for call sites (queue/notification
+// display) that predate PhoneNumber becoming optional and expect a plain
+// string.
+func (u User) PhoneOrEmpty() string {
+	if u.PhoneNumber == nil {
+		return ""
+	}
+	return *u.PhoneNumber
+}
 
 func (u *User) BeforeCreate(tx *gorm.DB) error {
 	if u.ID == uuid.Nil {

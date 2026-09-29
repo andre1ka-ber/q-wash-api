@@ -15,12 +15,14 @@ import (
 	"github.com/google/uuid"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/auth"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/owner"
 	"q-wash-api/internal/photo"
 	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/service"
+	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
 )
 
@@ -30,16 +32,20 @@ type Handler struct {
 	serviceRepo *service.Repository
 	queueRepo   *queue.Repository
 	photoRepo   *photo.Repository
+	userRepo    *user.Repository
+	authRepo    *auth.Repository
 }
 
-func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository, photoRepo *photo.Repository) *Handler {
-	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo, photoRepo: photoRepo}
+func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository, photoRepo *photo.Repository, userRepo *user.Repository, authRepo *auth.Repository) *Handler {
+	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo, photoRepo: photoRepo, userRepo: userRepo, authRepo: authRepo}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin ...func(http.Handler) http.Handler) {
 	r.Route("/admin", func(a chi.Router) {
 		a.With(requireAdmin...).Get("/washing-points", h.listWashingPoints)
 		a.With(requireAdmin...).Get("/stats", h.stats)
+		a.With(requireAdmin...).Get("/washing-points/{id}/credentials", h.getCredentials)
+		a.With(requireAdmin...).Post("/washing-points/{id}/credentials/{role}/reset", h.resetCredentials)
 	})
 }
 
@@ -195,6 +201,87 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+type credentialUsernameResponse struct {
+	Username string `json:"username"`
+}
+
+type credentialsResponse struct {
+	Staff  credentialUsernameResponse `json:"staff"`
+	Worker credentialUsernameResponse `json:"worker"`
+}
+
+// getCredentials returns the usernames (never passwords — those are only
+// ever visible once, at creation or reset) of a washing point's
+// auto-provisioned staff/worker accounts, for display in q-wash-admin's
+// edit-point drawer.
+func (h *Handler) getCredentials(w http.ResponseWriter, r *http.Request) {
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	staff, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleStaff)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	worker, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleWorker)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{
+		Staff:  credentialUsernameResponse{Username: *staff.Username},
+		Worker: credentialUsernameResponse{Username: *worker.Username},
+	})
+}
+
+// resetCredentials regenerates a single account's password (role is
+// "staff" or "worker") and revokes its existing refresh tokens, so the old
+// session can't keep going after the password's been handed to someone
+// else. The new plaintext password is returned once, same as at creation.
+func (h *Handler) resetCredentials(w http.ResponseWriter, r *http.Request) {
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	var role user.Role
+	switch chi.URLParam(r, "role") {
+	case "staff":
+		role = user.RoleStaff
+	case "worker":
+		role = user.RoleWorker
+	default:
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_role", "role must be staff or worker"))
+		return
+	}
+
+	u, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, role)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	plaintext, err := user.ResetPassword(r.Context(), h.userRepo, u)
+	if err != nil {
+		httputil.WriteError(w, r, apperror.Internal(err))
+		return
+	}
+	if err := h.authRepo.RevokeAllRefreshTokensForUser(r.Context(), u.ID); err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, washingpoint.CredentialResponse{
+		Username: *u.Username,
+		Password: plaintext,
+	})
 }
 
 // parseHHMM parses a WashingPoint "HH:MM" open/close string into minutes

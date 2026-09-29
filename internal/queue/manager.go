@@ -266,7 +266,7 @@ func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookin
 			if !errors.As(err, &appErr) || appErr.Code != "user_not_found" {
 				return err
 			}
-			u = &user.User{PhoneNumber: in.Phone, Role: user.RoleCustomer}
+			u = &user.User{PhoneNumber: &in.Phone, Role: user.RoleCustomer}
 			if in.ClientName != "" {
 				name := in.ClientName
 				u.Name = &name

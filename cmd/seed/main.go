@@ -276,8 +276,8 @@ func seedService(database *gorm.DB, washingPointID uuid.UUID, name string, durat
 
 func seedUser(database *gorm.DB, phone string, name *string, role user.Role) (user.User, error) {
 	var u user.User
-	err := database.Where(user.User{PhoneNumber: phone}).
-		Attrs(user.User{Name: name, Role: role}).
+	err := database.Where("phone_number = ?", phone).
+		Attrs(user.User{PhoneNumber: &phone, Name: name, Role: role}).
 		FirstOrCreate(&u).Error
 	return u, err
 }

@@ -11,6 +11,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/user"
 )
 
 var timeFormatRegexp = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
@@ -70,6 +71,36 @@ type response struct {
 	Status      string   `json:"status"`
 	Description *string  `json:"description,omitempty"`
 	Amenities   []string `json:"amenities,omitempty"`
+}
+
+// CredentialResponse/AccountsResponse are exported so connectionrequest's
+// handler — which also surfaces newly-provisioned accounts, from
+// Manager.Approve — can reuse the exact same shape instead of duplicating
+// it.
+type CredentialResponse struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type AccountsResponse struct {
+	Staff  CredentialResponse `json:"staff"`
+	Worker CredentialResponse `json:"worker"`
+}
+
+// createResponse is only ever returned by create() — the one moment the
+// auto-provisioned staff/worker passwords exist in plaintext anywhere.
+// They're never stored, logged, or returned again after this response
+// (see internal/admin's credential-reset endpoint for re-issuing one).
+type createResponse struct {
+	response
+	Credentials AccountsResponse `json:"credentials"`
+}
+
+func ToAccountsResponse(accounts user.PointAccounts) AccountsResponse {
+	return AccountsResponse{
+		Staff:  CredentialResponse{Username: accounts.Staff.Username, Password: accounts.Staff.Password},
+		Worker: CredentialResponse{Username: accounts.Worker.Username, Password: accounts.Worker.Password},
+	}
 }
 
 func toResponse(wp *WashingPoint) response {
@@ -207,7 +238,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Amenities:   req.Amenities,
 	}
-	if err := h.repo.Create(r.Context(), wp); err != nil {
+	accounts, err := h.repo.CreateWithAccounts(r.Context(), wp)
+	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
 	}
@@ -226,7 +258,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, apperror.Internal(err))
 		return
 	}
-	httputil.WriteJSON(w, http.StatusCreated, toResponse(wp))
+	httputil.WriteJSON(w, http.StatusCreated, createResponse{
+		response:    toResponse(wp),
+		Credentials: ToAccountsResponse(accounts),
+	})
 }
 
 type updateRequest struct {

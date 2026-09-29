@@ -87,7 +87,7 @@ func (m *Manager) Create(ctx context.Context, in CreateInput) (*Notification, er
 	}
 
 	if !in.SendAt.After(time.Now()) {
-		m.attemptSend(ctx, target.PhoneNumber, n)
+		m.attemptSend(ctx, target.PhoneOrEmpty(), n)
 	}
 
 	return n, nil

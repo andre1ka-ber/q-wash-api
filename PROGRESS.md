@@ -220,3 +220,84 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   Tests: extended `TestAdmin_NetworkWideViews` (no `cover_url` before any
   upload, matches the photo's `url` after). Full suite (`go build ./...`,
   `go vet ./...`, unit tests, `test-integration`) clean.
+- 2026-09-29 — **Auto-provision staff+worker credentials on washing point
+  creation** (see `plan.md`, grilled and approved with the user first —
+  a "big task" per `docs/rules/general.md` §12). Every washing point now
+  gets a `staff` and a `worker` login the moment it's created, whether via
+  `POST /washing-points` or connection-request approval — previously
+  there was **no way at all** in production to create a staff/worker
+  account (only `cmd/seed`/the integration test helper ever set
+  `username`/`password_hash`, both direct-DB).
+  - **Migration `000025_users_phone_optional`**: `users.phone_number`
+    dropped its `NOT NULL` — staff/worker/admin never had a real phone
+    number, only ever NOT NULL because nothing but customer rows existed
+    before. Protected path (`migrations/`, agent-write-blocked by
+    `.claude/hooks/protect-paths.sh`) — written by the user, not this
+    agent, after explicit approval of the exact SQL.
+  - `user.User.PhoneNumber` changed `string` → `*string` (required once
+    the column allows NULL — an empty-string zero value would have
+    collided on the column's unique index for the second provisioned
+    account onward). Rippled through every read site:
+    `auth/{handler,service}.go`, `user/handler.go` (both `/me` and
+    `/auth/*` responses' `phone_number` are now `omitempty`/nullable),
+    `cmd/seed/main.go`, `queue/{manager,handler_day,helpers}.go`,
+    `notification/manager.go` — added `User.PhoneOrEmpty()` for the
+    display call sites that only ever handle customers (queue/notification
+    targets), so they don't need to care about the new nil case.
+  - New `internal/platform/password` (leaf package — `user` can't import
+    `internal/auth`, which imports `user`, so the hash/generate helpers
+    couldn't live there): `GenerateRandom()` (16 chars, excludes
+    `0/O/1/l/I`), `Hash()` (bcrypt, same cost as every existing call site).
+  - New `internal/user/provision.go`: `ProvisionPointAccounts(ctx, tx,
+    washingPointID, pointName)` creates both accounts inside the caller's
+    transaction — username is `slugify(pointName)` (+worker suffix for
+    the worker account), numeric `-2`/`-3`/... suffix on collision
+    (checked network-wide via the tx, not just within that point).
+    `ResetPassword` regenerates one account's password.
+  - `washingpoint.Repository.CreateWithAccounts` wraps the point-row
+    insert + `ProvisionPointAccounts` in one `db.Transaction` — **scope
+    note**: only the point row + accounts are in this transaction, not
+    the schedule/box seeding that follows (unchanged, still separate
+    calls) — wrapping those too would've meant changing the
+    `ScheduleSeeder`/`BoxSeeder` interfaces to accept an explicit `tx`,
+    a materially bigger refactor than this feature needed; flagged as a
+    deliberate scope-down from `plan.md`'s literal wording, not
+    silently dropped.
+  - `connectionrequest.Manager.Approve` now calls the same
+    `CreateWithAccounts` (was a bare `wpRepo.Create`) — same atomicity,
+    same provisioning, one shared code path for both places a washing
+    point gets created.
+  - `POST /washing-points` and `PATCH /connection-requests/{id}`
+    (`status: approved`) responses both gained a one-time `credentials`
+    object (`{staff: {username,password}, worker: {username,password}}`)
+    — the only moment either plaintext password is ever visible; not
+    stored, not logged, not returned again.
+  - New admin endpoints: `GET
+    /admin/washing-points/{id}/credentials` (usernames only) and `POST
+    /admin/washing-points/{id}/credentials/{role}/reset` (regenerates,
+    revokes the account's existing refresh tokens via the already-existing
+    `auth.Repository.RevokeAllRefreshTokensForUser`, returns the new
+    password once).
+  - Docs: `docs/API.md` (new "Washing point credentials" section,
+    updated auth/admin/connection-request sections), `docs/openapi.yaml`
+    (new `Credential`/`PointAccounts` schemas, 2 new paths, `User.
+    phone_number` now nullable), `docs/DATA_MODEL.md` (`User` entry).
+  - Tests: new `internal/integration/credentials_test.go`
+    (`TestWashingPointCredentials`) — creation returns working
+    staff+worker logins (actually logs in with them), a same-named
+    second point gets a disambiguated username, RBAC on both new admin
+    endpoints, reset revokes the old refresh token and invalidates the
+    old password while the new one works, connection-request approval
+    also provisions working credentials. **Not yet run against a real
+    DB** — needs migration `000025` applied first (the protected-path
+    migration above); compiles clean (`go build -tags=integration
+    ./...`, `go vet -tags=integration ./...`) but wasn't executed by this
+    agent. `go build ./...`, `go vet ./...`, and the full non-integration
+    unit suite are clean.
+  - Also touches `q-wash-shared` (new types: `Credential`,
+    `PointAccounts`, `WashingPointCreated`, `ConnectionRequestReviewed`,
+    `WashingPointCredentialUsernames`; `User.phone_number` now
+    `string | null`; two new API wrappers) and `q-wash-admin`
+    (`NewPointDrawer`/`EditPointDrawer`/`ConnectionRequestsPage` all
+    surface the new one-time credentials reveal via a new shared
+    `CredentialsRevealModal`) — see those repos' own `PROGRESS.md`.

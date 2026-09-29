@@ -199,7 +199,7 @@ func (s *Service) findOrCreateUser(ctx context.Context, phone string) (*user.Use
 		return nil, err
 	}
 
-	newUser := &user.User{PhoneNumber: phone, Role: user.RoleCustomer}
+	newUser := &user.User{PhoneNumber: &phone, Role: user.RoleCustomer}
 	if err := s.userRepo.Create(ctx, newUser); err != nil {
 		return nil, err
 	}
