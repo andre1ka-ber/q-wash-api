@@ -1826,9 +1826,11 @@ paths:
       summary: Network-wide washing-point list with owner and service counts
       description: >
         Requires role admin. Richer than the public GET /washing-points:
-        adds owner_id/owner_name and services_count (active services only).
-        boxes_count remains the point's box capacity, not a count of Box
-        rows (the Box entity doesn't exist yet).
+        adds owner_id/owner_name, services_count (active services only), and
+        cover_url (the point's cover photo, batch-fetched; omitted if the
+        point has no photos yet). boxes_count remains the point's box
+        capacity, not a count of Box rows (the Box entity doesn't exist
+        yet).
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -2562,6 +2564,7 @@ components:
         status: { type: string, enum: [active, paused, pending_review] }
         boxes_count: { type: integer, minimum: 1 }
         services_count: { type: integer, minimum: 0 }
+        cover_url: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
       required: [id, name, address, status, boxes_count, services_count, created_at]
 

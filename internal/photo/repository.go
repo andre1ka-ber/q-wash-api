@@ -94,6 +94,34 @@ func (r *Repository) CountByWashingPoint(ctx context.Context, washingPointID uui
 	return count, nil
 }
 
+// FindCoverURLsByWashingPointIDs batch-fetches each point's cover photo
+// URL for the admin network list (internal/admin) — one grouped query
+// instead of N+1 per-point lookups, same pattern as
+// service.Repository.CountActiveByWashingPointIDs. A point missing from
+// the returned map has no photos yet.
+func (r *Repository) FindCoverURLsByWashingPointIDs(ctx context.Context, washingPointIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	urls := make(map[uuid.UUID]string, len(washingPointIDs))
+	if len(washingPointIDs) == 0 {
+		return urls, nil
+	}
+
+	var rows []struct {
+		WashingPointID uuid.UUID
+		URL            string
+	}
+	err := r.db.WithContext(ctx).Model(&WashingPointPhoto{}).
+		Select("washing_point_id, url").
+		Where("washing_point_id IN ? AND is_cover = true", washingPointIDs).
+		Find(&rows).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	for _, row := range rows {
+		urls[row.WashingPointID] = row.URL
+	}
+	return urls, nil
+}
+
 // FirstExcept returns the oldest remaining photo for washingPointID other
 // than excludeID, or nil if none — used to auto-promote a new cover when
 // the current one is deleted, same pattern as

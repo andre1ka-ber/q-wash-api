@@ -17,6 +17,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/owner"
+	"q-wash-api/internal/photo"
 	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/service"
@@ -28,10 +29,11 @@ type Handler struct {
 	ownerRepo   *owner.Repository
 	serviceRepo *service.Repository
 	queueRepo   *queue.Repository
+	photoRepo   *photo.Repository
 }
 
-func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository) *Handler {
-	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo}
+func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository, photoRepo *photo.Repository) *Handler {
+	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo, photoRepo: photoRepo}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin ...func(http.Handler) http.Handler) {
@@ -50,6 +52,7 @@ type washingPointItem struct {
 	Status        string    `json:"status"`
 	BoxesCount    int       `json:"boxes_count"`
 	ServicesCount int64     `json:"services_count"`
+	CoverURL      *string   `json:"cover_url,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -86,6 +89,12 @@ func (h *Handler) listWashingPoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	coverURLs, err := h.photoRepo.FindCoverURLsByWashingPointIDs(r.Context(), pointIDs)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
 	items := make([]washingPointItem, len(points))
 	for i, wp := range points {
 		item := washingPointItem{
@@ -103,6 +112,9 @@ func (h *Handler) listWashingPoints(w http.ResponseWriter, r *http.Request) {
 			if name, ok := ownerNames[*wp.OwnerID]; ok {
 				item.OwnerName = &name
 			}
+		}
+		if url, ok := coverURLs[wp.ID]; ok {
+			item.CoverURL = &url
 		}
 		items[i] = item
 	}

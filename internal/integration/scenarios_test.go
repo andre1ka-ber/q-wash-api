@@ -479,10 +479,36 @@ func TestAdmin_NetworkWideViews(t *testing.T) {
 				if item["owner_name"] != "Titan LLC" {
 					t.Errorf("expected owner_name %q, got %v", "Titan LLC", item["owner_name"])
 				}
+				if item["cover_url"] != nil {
+					t.Errorf("expected no cover_url before any photo is uploaded, got %v", item["cover_url"])
+				}
 			}
 		}
 		if !found {
 			t.Fatal("expected to find wp1 in the admin list")
+		}
+	})
+
+	t.Run("admin list picks up a point's cover photo once uploaded", func(t *testing.T) {
+		upload := env.uploadFile(t, "/api/v1/washing-points/"+wp1.str("id")+"/photos", adminAccess, "photo.jpg", fakeJPEG, false)
+		if upload.status != http.StatusCreated {
+			t.Fatalf("upload cover photo: expected 201, got %d (%v)", upload.status, upload.body)
+		}
+
+		resp := env.do(t, http.MethodGet, "/api/v1/admin/washing-points", adminAccess, nil)
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+		items, _ := resp.body["items"].([]any)
+		var coverURL any
+		for _, raw := range items {
+			item, _ := raw.(map[string]any)
+			if item["id"] == wp1.str("id") {
+				coverURL = item["cover_url"]
+			}
+		}
+		if coverURL != upload.body["url"] {
+			t.Errorf("expected cover_url %v to match the uploaded photo's url, got %v", upload.body["url"], coverURL)
 		}
 	})
 

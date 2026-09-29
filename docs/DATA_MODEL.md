@@ -192,7 +192,7 @@ safe, swappable for S3/GCS later with no change to `internal/photo`.
 | id | uuid | PK |
 | washing_point_id | uuid | FK -> WashingPoint |
 | url | string | |
-| is_cover | bool | default false; exactly one cover per point, enforced in `photo.Manager` — the first photo uploaded is always the cover; deleting the cover auto-promotes the oldest remaining one, same "auto-promote on delete" pattern as `ServicePriceOption.is_default` |
+| is_cover | bool | default false; exactly one cover per point, enforced in `photo.Manager` — the first photo uploaded is always the cover; deleting the cover auto-promotes the oldest remaining one, same "auto-promote on delete" pattern as `ServicePriceOption.is_default`. Also batch-read by `photo.Repository.FindCoverURLsByWashingPointIDs`, exposed as `cover_url` on `GET /admin/washing-points` (`internal/admin`) |
 | sort_order | int | |
 | created_at | timestamp | |
 

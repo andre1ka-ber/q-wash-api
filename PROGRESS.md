@@ -207,3 +207,16 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   `internal/integration`, which needs a running Postgres) all clean. Not
   verified against a real Sentry project — no DSN exists yet, same
   "blocked externally" shape as push notifications' FCM verification.
+- 2026-09-29 — **Added `cover_url` to `GET /admin/washing-points`**:
+  q-wash-admin's points table was rendering a static striped placeholder
+  for every point — the endpoint never returned a photo at all, same root
+  cause as the q-wash mobile app's blank cover image (never wired, not a
+  regression). New `photo.Repository.FindCoverURLsByWashingPointIDs`
+  batch-fetches each point's `is_cover` photo in one grouped query (same
+  pattern as `service.Repository.CountActiveByWashingPointIDs`), wired
+  into `internal/admin.Handler` (now takes a `*photo.Repository`).
+  `cover_url` is `omitempty`/nullable — absent for a point with no photos.
+  Docs updated: `docs/API.md`, `docs/openapi.yaml`, `docs/DATA_MODEL.md`.
+  Tests: extended `TestAdmin_NetworkWideViews` (no `cover_url` before any
+  upload, matches the photo's `url` after). Full suite (`go build ./...`,
+  `go vet ./...`, unit tests, `test-integration`) clean.
