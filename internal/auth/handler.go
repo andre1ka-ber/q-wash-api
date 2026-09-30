@@ -37,6 +37,7 @@ func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 // token. The caller must wrap r with RequireAuth.
 func (h *Handler) RegisterAuthenticatedRoutes(r chi.Router) {
 	r.Post("/auth/logout", h.logout)
+	r.Patch("/auth/password", h.changePassword)
 }
 
 // Middleware exposes RequireAuth bound to this handler's jwt.Manager, so
@@ -128,6 +129,39 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pair, err := h.service.Refresh(r.Context(), req.RefreshToken)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, toTokenPairResponse(pair))
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// changePassword lets the caller change its own password, given the
+// current one — see Service.ChangePassword. Requires auth, unlike
+// login/refresh: the caller proves identity via its access token plus
+// the current password, not the new password alone.
+func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := httputil.AuthUser(w, r)
+	if !ok {
+		return
+	}
+
+	var req changePasswordRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if req.CurrentPassword == "" || req.NewPassword == "" {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_password", "current_password and new_password are required"))
+		return
+	}
+
+	pair, err := h.service.ChangePassword(r.Context(), authUser.ID, req.CurrentPassword, req.NewPassword)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return

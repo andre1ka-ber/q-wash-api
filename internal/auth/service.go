@@ -20,6 +20,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/jwt"
+	"q-wash-api/internal/platform/password"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/user"
 )
@@ -27,7 +28,28 @@ import (
 var (
 	phoneRegexp   = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
 	otpCodeRegexp = regexp.MustCompile(`^\d{6}$`)
+
+	passwordUpperRegexp = regexp.MustCompile(`[A-ZА-Я]`)
+	passwordLowerRegexp = regexp.MustCompile(`[a-zа-я]`)
+	passwordDigitRegexp = regexp.MustCompile(`[0-9]`)
 )
+
+// ValidatePasswordPolicy enforces the same rule q-wash-cabinet's "Сменить
+// пароль" strength meter already displays to the user (at least 8
+// characters, a digit, and both an uppercase and lowercase letter) — this
+// makes that checklist a live preview of a real server-enforced rule
+// instead of decoration.
+func ValidatePasswordPolicy(newPassword string) error {
+	switch {
+	case len(newPassword) < 8:
+		return apperror.BadRequest("invalid_password", "password must be at least 8 characters")
+	case !passwordDigitRegexp.MatchString(newPassword):
+		return apperror.BadRequest("invalid_password", "password must contain a digit")
+	case !passwordUpperRegexp.MatchString(newPassword) || !passwordLowerRegexp.MatchString(newPassword):
+		return apperror.BadRequest("invalid_password", "password must contain both uppercase and lowercase letters")
+	}
+	return nil
+}
 
 func ValidatePhoneNumber(phone string) error {
 	if !phoneRegexp.MatchString(phone) {
@@ -239,6 +261,44 @@ func (s *Service) LoginWithPassword(ctx context.Context, username, password stri
 		return nil, err
 	}
 	u.LastLoginAt = &now
+
+	return s.issueTokenPair(ctx, u)
+}
+
+// ChangePassword lets an already-authenticated staff/worker/admin account
+// change its own password after verifying the current one — the only
+// other existing way to get a new password is an admin/staff-triggered
+// reset to a random one-time value (internal/user.ResetPassword). A
+// customer account (no PasswordHash at all) gets the same "forbidden" as
+// LoginWithPassword's own role check. All of the caller's *other* refresh
+// tokens are revoked (other sessions/devices must log in again), but a
+// fresh pair is issued for this call so the current session keeps
+// working instead of being logged out by its own request.
+func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) (*TokenPair, error) {
+	u, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if u.PasswordHash == nil {
+		return nil, apperror.Forbidden("forbidden", "this account has no password login")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(*u.PasswordHash), []byte(currentPassword)) != nil {
+		return nil, apperror.Unauthorized("invalid_credentials", "current password is incorrect")
+	}
+	if err := ValidatePasswordPolicy(newPassword); err != nil {
+		return nil, err
+	}
+
+	hash, err := password.Hash(newPassword)
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	if err := s.userRepo.SetCredentials(ctx, u.ID, *u.Username, hash); err != nil {
+		return nil, err
+	}
+	if err := s.repo.RevokeAllRefreshTokensForUser(ctx, u.ID); err != nil {
+		return nil, err
+	}
 
 	return s.issueTokenPair(ctx, u)
 }

@@ -210,6 +210,47 @@ paths:
         "204": { description: Revoked (or already was) }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/auth/password:
+    patch:
+      tags: [Auth]
+      operationId: changePassword
+      summary: Change the caller's own password
+      description: >
+        Requires auth; staff/worker/admin only (403 `forbidden` for a
+        customer, which has no password login). Self-service alternative
+        to `POST /washing-points/{id}/credentials/{role}/reset` — that
+        endpoint is for a forgotten password or an admin acting on
+        someone else's account; this one is for a logged-in caller who
+        knows their current password and wants to pick their own new one.
+        400 `invalid_password` if either field is missing or
+        `new_password` fails the policy (at least 8 characters, a digit,
+        and both an uppercase and lowercase letter); 401
+        `invalid_credentials` if `current_password` is wrong. On success,
+        all of the caller's *other* refresh tokens are revoked (other
+        sessions/devices must log in again) and a fresh token pair is
+        returned for this one, so the caller isn't logged out by its own
+        request.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password, example: NewPass123 }
+              required: [current_password, new_password]
+      responses:
+        "200":
+          description: Fresh token pair for the caller
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /api/v1/me:
     get:
       tags: [Users]
@@ -394,7 +435,10 @@ paths:
         active session must log in again with the new password). Returns
         the new plaintext password once — same one-time-visibility as
         creation. Same own-point-only restriction on staff as the GET
-        above.
+        above. For a logged-in account changing its *own* password (knows
+        the current one), see `PATCH /auth/password` instead — this
+        endpoint is for a forgotten password or an admin acting on
+        someone else's account.
       security: [{ bearerAuth: [] }]
       responses:
         "200":

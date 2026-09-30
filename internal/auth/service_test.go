@@ -35,6 +35,34 @@ func TestValidatePhoneNumber_Invalid(t *testing.T) {
 	}
 }
 
+func TestValidatePasswordPolicy_Valid(t *testing.T) {
+	cases := []string{"Password1", "Abcdefg2", "СтройныйПароль9", "aB3defgh"}
+	for _, pw := range cases {
+		t.Run(pw, func(t *testing.T) {
+			if err := ValidatePasswordPolicy(pw); err != nil {
+				t.Errorf("expected %q to be valid, got %v", pw, err)
+			}
+		})
+	}
+}
+
+func TestValidatePasswordPolicy_Invalid(t *testing.T) {
+	cases := []string{
+		"",
+		"Ab1",      // too short
+		"Abcdefgh", // no digit
+		"abcdefg1", // no uppercase
+		"ABCDEFG1", // no lowercase
+	}
+	for _, pw := range cases {
+		t.Run(pw, func(t *testing.T) {
+			if err := ValidatePasswordPolicy(pw); err == nil {
+				t.Errorf("expected %q to be invalid", pw)
+			}
+		})
+	}
+}
+
 func TestGenerateOTPCode_FormatAndUniqueness(t *testing.T) {
 	seen := make(map[string]bool)
 	for i := 0; i < 20; i++ {

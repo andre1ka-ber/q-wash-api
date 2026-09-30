@@ -352,3 +352,30 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   both clean afterward. `plan-credentials.md` deleted — feature is fully
   implemented, tested against a real DB, and verified live in the browser
   (see `q-wash-admin`/`q-wash-cabinet`'s own `PROGRESS.md`).
+
+- 2026-09-30 — **New self-service password change**: `PATCH
+  /auth/password` — `auth.Service.ChangePassword` verifies
+  `current_password` (bcrypt), enforces `ValidatePasswordPolicy`
+  (≥8 chars, a digit, upper+lower case — the same rule
+  `q-wash-cabinet`'s "Сменить пароль" card already displayed as a
+  client-only strength meter with nothing behind it), hashes and stores
+  the new one, revokes all of the caller's *other* refresh tokens, and
+  returns a fresh token pair for the caller's own session (so changing
+  your own password doesn't log you out of the tab you did it from).
+  Distinct from the existing `POST
+  /washing-points/{id}/credentials/{role}/reset` (admin/staff-triggered,
+  random one-time password, no current-password check, e.g. for a
+  forgotten one) — both are now cross-referenced in `docs/API.md` and
+  `docs/openapi.yaml`. Unit tests: `ValidatePasswordPolicy` valid/invalid
+  cases. Integration tests (`password_change_test.go`): success revokes
+  the old session and old password while keeping the new pair's token
+  valid, wrong current password rejected (nothing changes), each policy
+  rule's rejection, unauthenticated 401, customer-role 403 (no password
+  login at all). Verified live end-to-end against a real (throwaway,
+  disposable) Postgres + running API + `q-wash-cabinet` dev server, no
+  mocks: changed a seeded staff account's password through the actual
+  UI, confirmed the old password stopped working, the new one worked,
+  and the current tab's session survived the change without a forced
+  re-login. `make test` and `make test-integration` both clean.
+  `plan.md`/`progress.md` deleted — see `q-wash-shared`/`q-wash-cabinet`
+  `PROGRESS.md` for the client-side half of this change.
