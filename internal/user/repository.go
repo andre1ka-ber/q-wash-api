@@ -68,13 +68,22 @@ func (r *Repository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]User, er
 	return users, nil
 }
 
-// FindByWashingPointAndRole finds the one staff or worker account scoped
-// to washingPointID (internal/admin's credentials get/reset endpoints —
-// there's exactly one of each per point, see user.ProvisionPointAccounts).
+// FindByWashingPointAndRole finds the auto-provisioned staff or worker
+// login account for washingPointID (internal/washingpoint's credentials
+// get/reset endpoints). washing_point_id+role is deliberately NOT unique:
+// a customer can be promoted to staff and scoped to a point by direct-DB
+// role promotion (see docs/DATA_MODEL.md) without ever getting a username,
+// so this must also filter to username IS NOT NULL — a staff/worker row
+// with no username isn't a login account at all, and returning one here
+// would crash the caller's *User.Username dereference. created_at ASC
+// makes the pick deterministic on the rare legitimate case of more than
+// one (the oldest — closest to "the" provisioned account — wins) rather
+// than whatever order the DB happens to return.
 func (r *Repository) FindByWashingPointAndRole(ctx context.Context, washingPointID uuid.UUID, role Role) (*User, error) {
 	var u User
 	err := r.db.WithContext(ctx).
-		Where("washing_point_id = ? AND role = ?", washingPointID, role).
+		Where("washing_point_id = ? AND role = ? AND username IS NOT NULL", washingPointID, role).
+		Order("created_at ASC").
 		First(&u).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, apperror.NotFound("user_not_found", "user not found")

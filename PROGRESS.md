@@ -327,3 +327,28 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   unit suite, and `go build -tags=integration ./...`/`go vet
   -tags=integration ./...` all clean; the integration test itself still
   can't run for the same reason as above (migration `000025` pending).
+- 2026-09-30 — **Migration `000025` landed** (added by the user, per
+  `.claude/hooks/protect-paths.sh` — `migrations/` stays agent-write-
+  blocked); ran the full `test-integration` suite for real for the first
+  time against it. Caught and fixed a real bug on the first run, not a
+  false alarm: `user.Repository.FindByWashingPointAndRole` assumed
+  `washing_point_id`+`role` is unique per point ("there's exactly one of
+  each"), but it isn't — the schema has no such constraint, and a customer
+  can be promoted to staff and scoped to a point by direct-DB role
+  promotion (already-documented pattern, `docs/DATA_MODEL.md`) without
+  ever getting a `username`. When that row happened to be the one
+  `.First()` returned instead of the auto-provisioned login, `internal/
+  washingpoint.Handler.getCredentials`'s `*staff.Username` dereference
+  panicked (chi's `Recoverer` turned it into a 500, not a hard crash, but
+  still broken for any point with more than one staff account — a
+  completely normal real-world case, e.g. an owner's additional hires).
+  Fixed by filtering to `username IS NOT NULL` (that's the actual
+  semantic meaning of "the point's login account") plus a deterministic
+  `ORDER BY created_at ASC` for the rare legitimate multi-match case.
+  Found by `TestWashingPointCredentials`'s own IDOR subtest, not a
+  separately-added test — no new test needed, the existing one just
+  needed a real DB to actually exercise this path. Full
+  `test-integration` suite (not just this test) and the full unit suite
+  both clean afterward. `plan-credentials.md` deleted — feature is fully
+  implemented, tested against a real DB, and verified live in the browser
+  (see `q-wash-admin`/`q-wash-cabinet`'s own `PROGRESS.md`).
