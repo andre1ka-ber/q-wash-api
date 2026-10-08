@@ -38,6 +38,7 @@ import (
 	"q-wash-api/internal/app"
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/push"
+	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
 	"q-wash-api/internal/user"
 )
@@ -112,6 +113,12 @@ func (s *spySender) Send(_ context.Context, to, text string) error {
 	defer s.mu.Unlock()
 	s.messages = append(s.messages, sentMessage{To: to, Text: text})
 	return nil
+}
+
+// SendOTP lets the spy stand in for the OTP sender too, recording the same
+// text the real stub would log so lastCodeFor can pull the code out.
+func (s *spySender) SendOTP(ctx context.Context, to, code string, ttl time.Duration) error {
+	return s.Send(ctx, to, sms.OTPMessage(code, ttl))
 }
 
 var otpCodeRegexp = regexp.MustCompile(`\b(\d{6})\b`)
@@ -214,7 +221,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	sender := &spySender{}
 	pushSpy := &spyPush{}
-	server := httptest.NewServer(app.New(database, cfg, sender, pushSpy, fileStorage))
+	server := httptest.NewServer(app.New(database, cfg, sender, sender, pushSpy, fileStorage))
 	t.Cleanup(server.Close)
 
 	return &testEnv{baseURL: server.URL, client: server.Client(), sms: sender, push: pushSpy, db: database, cfg: cfg}

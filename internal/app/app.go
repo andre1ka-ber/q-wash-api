@@ -41,10 +41,10 @@ import (
 // Kept in one function so the wiring order and dependency graph between
 // features is easy to see as more phases land.
 //
-// smsSender and fileStorage are injected (rather than constructed
+// smsSender (free-text notifications), otpSender (login codes) and fileStorage are injected (rather than constructed
 // internally) so tests can pass a spy sender / a temp-dir-backed storage
 // instead of the stdout stub / uploads dir cmd/api uses in dev.
-func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender push.Sender, fileStorage storage.Storage) http.Handler {
+func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender sms.OTPSender, pushSender push.Sender, fileStorage storage.Storage) http.Handler {
 	// Sentry is production-only: an empty DSN here (whether Monitoring.DSN was
 	// never set, or this just isn't a production deploy) makes the middleware
 	// a passthrough.
@@ -61,7 +61,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, pushSender 
 	userHandler := user.NewHandler(userRepo)
 
 	authRepo := auth.NewRepository(database)
-	authService := auth.NewService(authRepo, userRepo, smsSender, jwtManager, cfg.Auth)
+	authService := auth.NewService(authRepo, userRepo, otpSender, jwtManager, cfg.Auth)
 	authHandler := auth.NewHandler(authService, jwtManager)
 
 	wpRepo := washingpoint.NewRepository(database)

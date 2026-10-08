@@ -16,6 +16,7 @@ type Config struct {
 	Auth       AuthConfig
 	Storage    StorageConfig
 	Push       PushConfig
+	SMS        SMSConfig
 	Monitoring MonitoringConfig
 }
 
@@ -75,6 +76,18 @@ type StorageConfig struct {
 type PushConfig struct {
 	ProjectID          string
 	ServiceAccountJSON []byte
+}
+
+// SMSConfig selects the OTP delivery provider. Provider "stub" (the default)
+// only logs the code; "payom" sends through Payom.tj and requires the Payom*
+// fields (see internal/platform/sms.PayomConfig). The token is a secret —
+// never commit it.
+type SMSConfig struct {
+	Provider           string
+	PayomBaseURL       string
+	PayomToken         string
+	PayomSenderName    string
+	PayomOTPTemplateID string
 }
 
 // MonitoringConfig configures Sentry error reporting. Empty DSN means
@@ -159,7 +172,14 @@ func Load() (Config, error) {
 			Dir:     getEnv("UPLOADS_DIR", "./uploads"),
 			BaseURL: getEnv("UPLOADS_BASE_URL", "/uploads"),
 		},
-		Push:       PushConfig{ProjectID: getEnv("FCM_PROJECT_ID", "")},
+		Push: PushConfig{ProjectID: getEnv("FCM_PROJECT_ID", "")},
+		SMS: SMSConfig{
+			Provider:           getEnv("SMS_PROVIDER", "stub"),
+			PayomBaseURL:       getEnv("PAYOM_BASE_URL", ""),
+			PayomToken:         getEnv("PAYOM_API_TOKEN", ""),
+			PayomSenderName:    getEnv("PAYOM_SENDER_NAME", "QWash"),
+			PayomOTPTemplateID: getEnv("PAYOM_OTP_TEMPLATE_ID", ""),
+		},
 		Monitoring: MonitoringConfig{DSN: getEnv("SENTRY_DSN", "")},
 	}
 

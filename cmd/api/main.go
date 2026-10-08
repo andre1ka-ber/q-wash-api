@@ -77,7 +77,18 @@ func run() error {
 		return err
 	}
 
-	handler := app.New(database, cfg, sms.NewStubSender(), pushSender, fileStorage)
+	otpSender, err := sms.NewOTPSender(cfg.SMS.Provider, sms.PayomConfig{
+		BaseURL:       cfg.SMS.PayomBaseURL,
+		Token:         cfg.SMS.PayomToken,
+		SenderName:    cfg.SMS.PayomSenderName,
+		OTPTemplateID: cfg.SMS.PayomOTPTemplateID,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Booking-stage notifications stay on the stub: only OTP goes out via the provider.
+	handler := app.New(database, cfg, sms.NewStubSender(), otpSender, pushSender, fileStorage)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,

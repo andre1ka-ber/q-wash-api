@@ -40,9 +40,11 @@ curl localhost:8080/api/v1/washing-points
 The seeded users (phone → role): `+15550000001` → admin, `+15550000002` →
 staff, `+15550000006` → worker, `+15550000003` → customer (plus two more
 demo customers used only to seed a double-booking scenario). Log in as any
-of them via `POST /api/v1/auth/otp/request` — since there's no real SMS
-provider wired up, the OTP code is printed to the API's stdout log (`sms
-(stub, not actually sent)`), not actually sent anywhere.
+of them via `POST /api/v1/auth/otp/request` — with the default
+`SMS_PROVIDER=stub` the OTP code is printed to the API's stdout log (`sms
+(stub, not actually sent)`), not actually sent anywhere. Set
+`SMS_PROVIDER=payom` plus the `PAYOM_*` variables in `.env.example` to send
+real SMS (only `+992` numbers are accepted by Payom).
 
 The admin/staff/worker accounts also get a username + password (seeded by
 `cmd/seed`, dev-only) for `POST /api/v1/auth/login` — used by the queue
@@ -119,7 +121,7 @@ internal/
   owner/        owner (network operator) CRUD
   connectionrequest/ prospective owner's onboarding request + admin approve/reject
   admin/        network-wide admin views (washing-point list, stats)
-  notification/ staff-sent notifications, delivered via the sms.Sender stub
+  notification/ staff-sent notifications, delivered via the sms.Sender stub (OTP: sms.OTPSender, Payom or stub)
   apperror/     typed error -> HTTP status/code mapping
   httputil/     JSON response helpers, pagination
   integration/  full-HTTP-stack tests, gated behind the `integration` build tag
@@ -148,9 +150,11 @@ over it.
 
 ## Known limitations
 
-- No real SMS provider — `sms.Sender` has one stub implementation that logs
-  instead of sending. Swapping in a real provider means implementing the
-  same interface, no other code changes.
+- Only OTP codes go out through a real SMS provider (Payom.tj, opt-in via
+  `SMS_PROVIDER=payom`, `sms.OTPSender`). Booking notifications still use the
+  logging `sms.Sender` stub. Payom delivery is fire-and-forget: a 201 only
+  means "queued", delivery-status webhooks aren't consumed, and there are no
+  retries (Payom documents no idempotency key).
 - No background worker: a notification scheduled for the future (`send_at`
   after now) is created as `pending` and stays that way — there's nothing
   yet that sweeps due notifications and sends them later.

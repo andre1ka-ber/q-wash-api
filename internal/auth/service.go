@@ -101,17 +101,17 @@ func NormalizePhoneNumber(raw string) (string, error) {
 type Service struct {
 	repo       *Repository
 	userRepo   *user.Repository
-	sms        sms.Sender
+	sms        sms.OTPSender
 	jwtManager *jwt.Manager
 	cfg        config.AuthConfig
 }
 
-func NewService(repo *Repository, userRepo *user.Repository, smsSender sms.Sender, jwtManager *jwt.Manager, cfg config.AuthConfig) *Service {
-	return &Service{repo: repo, userRepo: userRepo, sms: smsSender, jwtManager: jwtManager, cfg: cfg}
+func NewService(repo *Repository, userRepo *user.Repository, otpSender sms.OTPSender, jwtManager *jwt.Manager, cfg config.AuthConfig) *Service {
+	return &Service{repo: repo, userRepo: userRepo, sms: otpSender, jwtManager: jwtManager, cfg: cfg}
 }
 
 // RequestOTP generates a one-time code, stores its hash, and "sends" it via
-// the configured sms.Sender (a stdout stub in dev). It's rate-limited per
+// the configured sms.OTPSender (a stdout stub in dev). It's rate-limited per
 // phone number by cfg.OTPCooldown.
 func (s *Service) RequestOTP(ctx context.Context, phone string) error {
 	if err := ValidatePhoneNumber(phone); err != nil {
@@ -144,8 +144,7 @@ func (s *Service) RequestOTP(ctx context.Context, phone string) error {
 		return err
 	}
 
-	message := fmt.Sprintf("Your Pegasus Wash verification code is %s. It expires in %d minutes.", code, int(s.cfg.OTPTTL.Minutes()))
-	if err := s.sms.Send(ctx, phone, message); err != nil {
+	if err := s.sms.SendOTP(ctx, phone, code, s.cfg.OTPTTL); err != nil {
 		return apperror.Internal(err)
 	}
 	return nil

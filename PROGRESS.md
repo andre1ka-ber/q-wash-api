@@ -379,3 +379,22 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   re-login. `make test` and `make test-integration` both clean.
   `plan.md`/`progress.md` deleted — see `q-wash-shared`/`q-wash-cabinet`
   `PROGRESS.md` for the client-side half of this change.
+
+- 2026-10-08 — **Payom.tj SMS provider for OTP**: new `sms.OTPSender`
+  (`SendOTP(phone, code, ttl)`) with `PayomSender` (`internal/platform/sms/
+  payom.go`, plain `net/http`, no new dependency): `POST /api/message` with
+  the account JWT, free text by default (legal-entity accounts) or a
+  `templateMessage` with a `code` variable when `PAYOM_OTP_TEMPLATE_ID` is set
+  (individual accounts); Russian OTP text kept to one SMS segment; rejects
+  non-`+992` numbers before calling out; 201 = success, 401/422/other mapped to
+  errors that never include the token; 10 s timeout, no retries. Selected by
+  `SMS_PROVIDER=stub|payom` (+ `PAYOM_BASE_URL`, `PAYOM_API_TOKEN`,
+  `PAYOM_SENDER_NAME`, `PAYOM_OTP_TEMPLATE_ID`); `payom` with missing values
+  fails at startup, the default stub logs a startup warning. `auth.NewService`
+  and `app.New` take the OTP sender separately; booking notifications stay on
+  the logging `sms.Sender` stub. Delivery-status webhooks deliberately not
+  implemented. Tests: `payom_test.go` (httptest: free text, template, error
+  mapping, token never leaked, non-TJ numbers never sent, network failure,
+  factory, message length); integration spy implements both interfaces.
+  `go vet`, `go test ./...` and `go test -tags=integration` clean. NOT yet
+  tried against the real Payom API — no account/credentials yet.

@@ -14,7 +14,7 @@ added later without a rewrite.
 | Primary keys | UUIDv7 (time-ordered), generated in app code via `google/uuid` — better index locality than UUIDv4/`gen_random_uuid()` |
 | Auth | Phone number + SMS OTP, no password. JWT access token + rotating refresh token. |
 | Roles | `customer`, `staff`, `admin` on `User.role` at MVP scope (this doc). A fourth role, `worker`, was added later — see `docs/PLAN_WEB_APPS.md` phase 1/7. Staff/admin manage washing points/services and advance queue status; customers manage their own cars/bookings. |
-| SMS delivery | `SmsSender` interface; dev implementation logs the code to stdout. Real provider swapped in later behind the same interface. |
+| SMS delivery | `SmsSender` interface; dev implementation logs the code to stdout. OTPs now also have `OTPSender` with a Payom.tj implementation (`SMS_PROVIDER=payom`); notifications still use the stub. |
 | Washing point capacity | `boxes_count` field (default 2), configurable per point. Availability = sweep-line overlap check against this capacity. |
 | Operating hours | Single daily `open_time`/`close_time` per washing point (same every day) for MVP. Superseded by a per-weekday schedule table — see `docs/PLAN_WEB_APPS.md` phase 5; the original columns are kept but now legacy/informational only. |
 | Service pricing | `ServicePriceOption` sub-table per service (e.g. car size, or scope like "full body"/"parts only"); every service has at least one (default) option. |
