@@ -31,17 +31,17 @@ func (h *Handler) RegisterRoutes(r chi.Router, publicLimit func(http.Handler) ht
 		cr.With(requireAdmin...).Get("/", h.list)
 		cr.With(requireAdmin...).Get("/{id}", h.get)
 		cr.With(requireAdmin...).Post("/", h.create)
-		cr.With(requireAdmin...).Patch("/{id}", h.updateStatus)
+		cr.With(requireAdmin...).Patch("/{id}", h.update)
 	})
 }
 
 type response struct {
 	ID           string     `json:"id"`
 	BusinessName string     `json:"business_name"`
-	ContactName  string     `json:"contact_name"`
+	ContactName  *string    `json:"contact_name,omitempty"`
 	ContactPhone string     `json:"contact_phone"`
-	Address      string     `json:"address"`
-	BoxesCount   int        `json:"boxes_count"`
+	Address      *string    `json:"address,omitempty"`
+	BoxesCount   *int       `json:"boxes_count,omitempty"`
 	Note         *string    `json:"note,omitempty"`
 	Status       string     `json:"status"`
 	ReviewedBy   *string    `json:"reviewed_by,omitempty"`
@@ -154,12 +154,13 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	boxes := req.BoxesCount
 	c := &ConnectionRequest{
 		BusinessName: businessName,
-		ContactName:  contactName,
+		ContactName:  &contactName,
 		ContactPhone: contactPhone,
-		Address:      address,
-		BoxesCount:   req.BoxesCount,
+		Address:      &address,
+		BoxesCount:   &boxes,
 		Note:         note,
 		Status:       StatusNew,
 	}
@@ -182,8 +183,11 @@ type applyRequest struct {
 	Website string `json:"website"`
 }
 
-// apply is the unauthenticated twin of create, backing the landing page's
-// "connect your wash" form. It runs the same validation, then:
+// apply is the unauthenticated counterpart of create, backing the landing
+// page's "connect your wash" form. Only a phone and a name are required —
+// business_name or contact_name, at least one (business_name falls back to
+// contact_name); address, boxes_count and note are optional and an admin
+// completes the rest (PATCH /connection-requests/{id}) before approving.
 //   - honeypot filled: answers 202 without storing anything, so a bot learns
 //     nothing from the response;
 //   - an unreviewed (status=new) request with the same phone already exists:
@@ -208,16 +212,31 @@ func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
 	contactPhone := strings.TrimSpace(req.ContactPhone)
 	address := strings.TrimSpace(req.Address)
 
-	if err := validate(businessName, contactName, contactPhone, address, req.BoxesCount); err != nil {
-		httputil.WriteError(w, r, err)
+	if businessName == "" {
+		businessName = contactName
+	}
+	if businessName == "" {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_business_name", "business_name or contact_name is required"))
 		return
 	}
-	if !validPhone(contactPhone) {
+	if len(businessName) > 255 {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_business_name", "business_name is too long (max 255 chars)"))
+		return
+	}
+	if len(contactName) > 255 {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_contact_name", "contact_name is too long (max 255 chars)"))
+		return
+	}
+	if !validPhone(contactPhone) || len(contactPhone) > 32 {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_contact_phone", "contact_phone must contain 9 to 15 digits"))
 		return
 	}
-	if req.BoxesCount > maxApplyBoxes {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_boxes_count", "boxes_count is too large"))
+	if len(address) > 500 {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_address", "address is too long (max 500 chars)"))
+		return
+	}
+	if req.BoxesCount < 0 || req.BoxesCount > maxApplyBoxes {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_boxes_count", "boxes_count must be between 1 and 100 when given"))
 		return
 	}
 
@@ -241,12 +260,19 @@ func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		c := &ConnectionRequest{
 			BusinessName: businessName,
-			ContactName:  contactName,
 			ContactPhone: contactPhone,
-			Address:      address,
-			BoxesCount:   req.BoxesCount,
 			Note:         note,
 			Status:       StatusNew,
+		}
+		if contactName != "" {
+			c.ContactName = &contactName
+		}
+		if address != "" {
+			c.Address = &address
+		}
+		if req.BoxesCount > 0 {
+			boxes := req.BoxesCount
+			c.BoxesCount = &boxes
 		}
 		if err := h.repo.Create(r.Context(), c); err != nil {
 			httputil.WriteError(w, r, err)
@@ -276,13 +302,28 @@ func validPhone(s string) bool {
 	return digits >= 9 && digits <= 15
 }
 
-type updateStatusRequest struct {
-	Status string `json:"status"`
+// updateRequest is the PATCH body: any subset of the editable fields, and/or
+// a status transition. An empty string clears contact_name/address/note.
+type updateRequest struct {
+	Status       string  `json:"status"`
+	BusinessName *string `json:"business_name"`
+	ContactName  *string `json:"contact_name"`
+	ContactPhone *string `json:"contact_phone"`
+	Address      *string `json:"address"`
+	BoxesCount   *int    `json:"boxes_count"`
+	Note         *string `json:"note"`
 }
 
-// updateStatus is the only write on an existing request: approve or
-// reject. There's no endpoint to edit the submitted contact fields.
-func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
+func (u updateRequest) hasEdits() bool {
+	return u.BusinessName != nil || u.ContactName != nil || u.ContactPhone != nil ||
+		u.Address != nil || u.BoxesCount != nil || u.Note != nil
+}
+
+// update completes a still-new request (details the public form didn't
+// collect) and/or approves or rejects it. Edits are applied and saved first,
+// so `{status:"approved", address:"...", boxes_count:3}` fills the gaps and
+// approves in one call. Reviewed requests can't be edited.
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	authUser, ok := httputil.AuthUser(w, r)
 	if !ok {
 		return
@@ -294,10 +335,39 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req updateStatusRequest
+	var req updateRequest
 	if err := httputil.DecodeJSON(r, &req); err != nil {
 		httputil.WriteError(w, r, err)
 		return
+	}
+	if req.Status != "" && Status(req.Status) != StatusApproved && Status(req.Status) != StatusRejected {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_status", "status must be one of: approved, rejected"))
+		return
+	}
+	if req.Status == "" && !req.hasEdits() {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_body", "provide a status and/or fields to update"))
+		return
+	}
+
+	var current *ConnectionRequest
+	if req.hasEdits() {
+		current, err = h.repo.FindByID(r.Context(), id)
+		if err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
+		if current.Status != StatusNew {
+			httputil.WriteError(w, r, apperror.Conflict("connection_request_already_reviewed", "connection request has already been reviewed"))
+			return
+		}
+		if err := applyEdits(current, req); err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
+		if err := h.repo.Update(r.Context(), current); err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
 	}
 
 	switch Status(req.Status) {
@@ -319,8 +389,63 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		httputil.WriteJSON(w, http.StatusOK, toResponse(c))
 	default:
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_status", "status must be one of: approved, rejected"))
+		httputil.WriteJSON(w, http.StatusOK, toResponse(current))
 	}
+}
+
+// applyEdits validates the supplied fields and writes them onto c.
+func applyEdits(c *ConnectionRequest, req updateRequest) error {
+	trim := func(p *string) string { return strings.TrimSpace(*p) }
+
+	if req.BusinessName != nil {
+		v := trim(req.BusinessName)
+		if v == "" || len(v) > 255 {
+			return apperror.BadRequest("invalid_business_name", "business_name is required (max 255 chars)")
+		}
+		c.BusinessName = v
+	}
+	if req.ContactName != nil {
+		v := trim(req.ContactName)
+		if len(v) > 255 {
+			return apperror.BadRequest("invalid_contact_name", "contact_name is too long (max 255 chars)")
+		}
+		c.ContactName = nilIfEmpty(v)
+	}
+	if req.ContactPhone != nil {
+		v := trim(req.ContactPhone)
+		if v == "" || len(v) > 32 {
+			return apperror.BadRequest("invalid_contact_phone", "contact_phone is required (max 32 chars)")
+		}
+		c.ContactPhone = v
+	}
+	if req.Address != nil {
+		v := trim(req.Address)
+		if len(v) > 500 {
+			return apperror.BadRequest("invalid_address", "address is too long (max 500 chars)")
+		}
+		c.Address = nilIfEmpty(v)
+	}
+	if req.BoxesCount != nil {
+		if *req.BoxesCount < 1 {
+			return apperror.BadRequest("invalid_boxes_count", "boxes_count must be at least 1")
+		}
+		c.BoxesCount = req.BoxesCount
+	}
+	if req.Note != nil {
+		v := trim(req.Note)
+		if len(v) > 2000 {
+			return apperror.BadRequest("invalid_note", "note is too long (max 2000 chars)")
+		}
+		c.Note = nilIfEmpty(v)
+	}
+	return nil
+}
+
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func validate(businessName, contactName, contactPhone, address string, boxesCount int) error {

@@ -21,12 +21,12 @@ const (
 )
 
 type ConnectionRequest struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	BusinessName string     `gorm:"type:varchar(255);not null"`
-	ContactName  string     `gorm:"type:varchar(255);not null"`
-	ContactPhone string     `gorm:"type:varchar(32);not null"`
-	Address      string     `gorm:"type:varchar(500);not null"`
-	BoxesCount   int        `gorm:"not null"`
+	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
+	BusinessName string    `gorm:"type:varchar(255);not null"`
+	ContactName  *string   `gorm:"type:varchar(255)"`
+	ContactPhone string    `gorm:"type:varchar(32);not null"`
+	Address      *string   `gorm:"type:varchar(500)"`
+	BoxesCount   *int
 	Note         *string    `gorm:"type:text"`
 	Status       Status     `gorm:"type:varchar(16);not null;default:new"`
 	ReviewedBy   *uuid.UUID `gorm:"type:uuid"`

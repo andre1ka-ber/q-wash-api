@@ -1655,9 +1655,12 @@ paths:
       operationId: applyConnectionRequest
       summary: Public "connect your wash" application
       description: >
-        Unauthenticated; backs the q-wash-web landing form. Same fields and
-        validation as `POST /connection-requests`, plus `contact_phone` must
-        have 9-15 digits and `boxes_count` is capped at 100. Rate limited per
+        Unauthenticated; backs the q-wash-web landing form. Only a phone
+        (`contact_phone`, 9-15 digits) and a name are required — `business_name`
+        or `contact_name`, at least one (`business_name` falls back to
+        `contact_name`). `address`, `boxes_count` (1-100) and `note` are optional;
+        an admin completes the request with `PATCH /connection-requests/{id}`
+        before approving. Rate limited per
         IP (10/hour, 429 `too_many_requests` with `Retry-After`). Always
         answers 202 `{status: "received"}` and never echoes stored data: a
         filled honeypot `website` field is silently dropped, and an
@@ -1667,13 +1670,18 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - { $ref: "#/components/schemas/ConnectionRequestCreate" }
-                - type: object
-                  properties:
-                    website:
-                      type: string
-                      description: Honeypot. Leave empty; real visitors never fill it.
+              type: object
+              properties:
+                business_name: { type: string, maxLength: 255 }
+                contact_name: { type: string, maxLength: 255 }
+                contact_phone: { type: string, maxLength: 32 }
+                address: { type: string, maxLength: 500 }
+                boxes_count: { type: integer, minimum: 1, maximum: 100 }
+                note: { type: string, maxLength: 2000 }
+                website:
+                  type: string
+                  description: Honeypot. Leave empty; real visitors never fill it.
+              required: [contact_phone]
       responses:
         "202":
           description: Received
@@ -2627,16 +2635,16 @@ components:
       properties:
         id: { type: string, format: uuid }
         business_name: { type: string }
-        contact_name: { type: string }
+        contact_name: { type: string, description: Omitted while unset (public applications may not include it). }
         contact_phone: { type: string }
-        address: { type: string }
-        boxes_count: { type: integer, minimum: 1 }
+        address: { type: string, description: Omitted while unset; required before approval. }
+        boxes_count: { type: integer, minimum: 1, description: Omitted while unset; required before approval. }
         note: { type: string, nullable: true }
         status: { type: string, enum: [new, approved, rejected] }
         reviewed_by: { type: string, format: uuid, nullable: true }
         reviewed_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
-      required: [id, business_name, contact_name, contact_phone, address, boxes_count, status, created_at]
+      required: [id, business_name, contact_phone, status, created_at]
 
     ConnectionRequestList:
       type: object
@@ -2657,9 +2665,21 @@ components:
 
     ConnectionRequestReview:
       type: object
+      description: >
+        Any subset of the editable fields and/or a status transition (at least
+        one). Edits apply first, so details and approval can go in one call.
+        An empty string clears contact_name, address or note. 409
+        `connection_request_incomplete` when approving without address and
+        boxes_count; 409 `connection_request_already_reviewed` when editing a
+        reviewed request.
       properties:
         status: { type: string, enum: [approved, rejected] }
-      required: [status]
+        business_name: { type: string, maxLength: 255 }
+        contact_name: { type: string, maxLength: 255 }
+        contact_phone: { type: string, maxLength: 32 }
+        address: { type: string, maxLength: 500 }
+        boxes_count: { type: integer, minimum: 1 }
+        note: { type: string, maxLength: 2000 }
 
     QrCodeStats:
       type: object

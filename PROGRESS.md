@@ -409,3 +409,12 @@ phone; always 202 without echoing data. New `internal/platform/ratelimit`
 No migration, no new dependency. Tests: `ratelimit_test.go`, `handler_test.go`
 (phone validation), integration `connection_request_apply_test.go`.
 Docs updated: `API.md`, `openapi.yaml`.
+
+## Connection requests: optional details (2026-10-10)
+
+Public applications now need only a phone + one name. Migration `000026` drops NOT NULL on
+`connection_requests.contact_name/address/boxes_count` (model fields are pointers; JSON omits them while
+unset). `PATCH /connection-requests/{id}` now also edits fields (status optional); approving without
+address+boxes_count → 409 `connection_request_incomplete`. Admin `POST` unchanged (all fields required).
+Follow-up (not done): q-wash-admin/q-wash-shared still type these fields as required strings and have no
+edit form for a request.

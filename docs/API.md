@@ -419,8 +419,8 @@ business managing another point's owner or the onboarding queue.
 | GET | `/connection-requests` | admin | `{items: [...]}`, newest first. Optional `?status=new\|approved\|rejected` filter (400 `invalid_status` otherwise) |
 | GET | `/connection-requests/{id}` | admin | detail; 404 `connection_request_not_found` |
 | POST | `/connection-requests` | admin | body: `{business_name, contact_name, contact_phone, address, boxes_count, note?}`. Admin-created; the public landing form uses `POST /connection-requests/apply` below. |
-| POST | `/connection-requests/apply` | **public** | landing-page form (`q-wash-web`). Same body/validation as `POST /connection-requests`, plus `contact_phone` must have 9–15 digits (formatting chars `+ - ( )` and spaces allowed), `boxes_count` ≤ 100, and an optional honeypot field `website` (leave empty). Always `202 {"status":"received"}`, never echoes data/ids. A filled honeypot or an already-pending (`status=new`) request from the same `contact_phone` is accepted but not stored. Rate limited in-memory per client IP: 10/hour → 429 `too_many_requests` + `Retry-After`. |
-| PATCH | `/connection-requests/{id}` | admin | body: `{status: "approved"\|"rejected"}` — the only write on an existing request, no editing the submitted fields. 409 `connection_request_already_reviewed` if not still `new`. |
+| POST | `/connection-requests/apply` | **public** | landing-page form (`q-wash-web`). Only `contact_phone` (9–15 digits; `+ - ( )` and spaces allowed) and a name are required — `business_name` or `contact_name`, at least one (`business_name` falls back to `contact_name`). Optional: `address`, `boxes_count` (1–100), `note`, honeypot `website` (leave empty). Always `202 {"status":"received"}`, never echoes data/ids. A filled honeypot or an already-pending (`status=new`) request from the same `contact_phone` is accepted but not stored. Rate limited in-memory per client IP: 10/hour → 429 `too_many_requests` + `Retry-After`. Admin fills the gaps later via `PATCH` below. |
+| PATCH | `/connection-requests/{id}` | admin | body: any subset of `{business_name, contact_name, contact_phone, address, boxes_count, note}` and/or `status: "approved"\|"rejected"` (at least one; empty string clears `contact_name`/`address`/`note`). Edits apply first, so `{status:"approved", address, boxes_count}` completes and approves in one call. 409 `connection_request_already_reviewed` if not still `new`; 409 `connection_request_incomplete` when approving without `address` and `boxes_count` (public applications arrive without them). |
 
 Approving (`status: "approved"`) creates an `Owner` (reusing one whose
 `contact_phone` matches the request's, if any) and a `WashingPoint` with
@@ -431,6 +431,8 @@ sets `status = rejected`; neither action is reversible through this
 endpoint. The approve response also includes the new point's one-time
 `credentials` object — see "Washing point credentials" above; same
 provisioning call `POST /washing-points` uses.
+
+Admin `POST /connection-requests` still requires every field; `contact_name`, `address` and `boxes_count` are optional only on public applications (omitted from responses while unset).
 
 Validation: 400 `invalid_name` (owners); `invalid_business_name`/
 `invalid_contact_name`/`invalid_contact_phone`/`invalid_address`/

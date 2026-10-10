@@ -59,14 +59,19 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 		return nil, nil, user.PointAccounts{}, apperror.Conflict("connection_request_already_reviewed", "connection request has already been reviewed")
 	}
 
+	// Public applications arrive with only a name and phone; the details the
+	// new point needs must be filled in (PATCH) before it can be approved.
+	if cr.Address == nil || cr.BoxesCount == nil {
+		return nil, nil, user.PointAccounts{}, apperror.Conflict("connection_request_incomplete", "address and boxes_count must be filled in before approving")
+	}
+
 	own, err := m.ownerRepo.FindByPhone(ctx, cr.ContactPhone)
 	if err != nil {
 		return nil, nil, user.PointAccounts{}, err
 	}
 	if own == nil {
-		contactName := cr.ContactName
 		contactPhone := cr.ContactPhone
-		own = &owner.Owner{Name: cr.BusinessName, ContactName: &contactName, ContactPhone: &contactPhone}
+		own = &owner.Owner{Name: cr.BusinessName, ContactName: cr.ContactName, ContactPhone: &contactPhone}
 		if err := m.ownerRepo.Create(ctx, own); err != nil {
 			return nil, nil, user.PointAccounts{}, err
 		}
@@ -75,8 +80,8 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 	wp := &washingpoint.WashingPoint{
 		OwnerID:    &own.ID,
 		Name:       cr.BusinessName,
-		Address:    cr.Address,
-		BoxesCount: cr.BoxesCount,
+		Address:    *cr.Address,
+		BoxesCount: *cr.BoxesCount,
 		OpenTime:   "08:00",
 		CloseTime:  "20:00",
 		Status:     washingpoint.StatusPendingReview,
