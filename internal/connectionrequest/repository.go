@@ -56,3 +56,16 @@ func (r *Repository) Update(ctx context.Context, c *ConnectionRequest) error {
 	}
 	return nil
 }
+
+// ExistsNewByPhone reports whether an unreviewed request from this exact
+// contact phone is already waiting in the admin queue.
+func (r *Repository) ExistsNewByPhone(ctx context.Context, phone string) (bool, error) {
+	var n int64
+	err := r.db.WithContext(ctx).Model(&ConnectionRequest{}).
+		Where("contact_phone = ? AND status = ?", phone, StatusNew).
+		Limit(1).Count(&n).Error
+	if err != nil {
+		return false, apperror.Internal(err)
+	}
+	return n > 0, nil
+}

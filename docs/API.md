@@ -418,7 +418,8 @@ business managing another point's owner or the onboarding queue.
 | PATCH | `/owners/{id}` | admin | any subset of the create fields |
 | GET | `/connection-requests` | admin | `{items: [...]}`, newest first. Optional `?status=new\|approved\|rejected` filter (400 `invalid_status` otherwise) |
 | GET | `/connection-requests/{id}` | admin | detail; 404 `connection_request_not_found` |
-| POST | `/connection-requests` | admin | body: `{business_name, contact_name, contact_phone, address, boxes_count, note?}`. Admin-created for now — no public self-service "apply" form yet. |
+| POST | `/connection-requests` | admin | body: `{business_name, contact_name, contact_phone, address, boxes_count, note?}`. Admin-created; the public landing form uses `POST /connection-requests/apply` below. |
+| POST | `/connection-requests/apply` | **public** | landing-page form (`q-wash-web`). Same body/validation as `POST /connection-requests`, plus `contact_phone` must have 9–15 digits (formatting chars `+ - ( )` and spaces allowed), `boxes_count` ≤ 100, and an optional honeypot field `website` (leave empty). Always `202 {"status":"received"}`, never echoes data/ids. A filled honeypot or an already-pending (`status=new`) request from the same `contact_phone` is accepted but not stored. Rate limited in-memory per client IP: 10/hour → 429 `too_many_requests` + `Retry-After`. |
 | PATCH | `/connection-requests/{id}` | admin | body: `{status: "approved"\|"rejected"}` — the only write on an existing request, no editing the submitted fields. 409 `connection_request_already_reviewed` if not still `new`. |
 
 Approving (`status: "approved"`) creates an `Owner` (reusing one whose

@@ -21,10 +21,13 @@ func NewHandler(repo *Repository, manager *Manager) *Handler {
 	return &Handler{repo: repo, manager: manager}
 }
 
-// RegisterRoutes mounts /connection-requests, admin-only throughout — this
-// is the admin app's onboarding queue, not a staff-facing surface.
-func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin ...func(http.Handler) http.Handler) {
+// RegisterRoutes mounts /connection-requests. Everything is admin-only (the
+// admin app's onboarding queue, not a staff-facing surface) except
+// POST /connection-requests/apply, the public landing-page form, which is
+// unauthenticated and so goes through publicLimit (a rate limiter).
+func (h *Handler) RegisterRoutes(r chi.Router, publicLimit func(http.Handler) http.Handler, requireAdmin ...func(http.Handler) http.Handler) {
 	r.Route("/connection-requests", func(cr chi.Router) {
+		cr.With(publicLimit).Post("/apply", h.apply)
 		cr.With(requireAdmin...).Get("/", h.list)
 		cr.With(requireAdmin...).Get("/{id}", h.get)
 		cr.With(requireAdmin...).Post("/", h.create)
@@ -165,6 +168,112 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusCreated, toResponse(c))
+}
+
+type applyRequest struct {
+	BusinessName string  `json:"business_name"`
+	ContactName  string  `json:"contact_name"`
+	ContactPhone string  `json:"contact_phone"`
+	Address      string  `json:"address"`
+	BoxesCount   int     `json:"boxes_count"`
+	Note         *string `json:"note"`
+	// Website is a honeypot: the landing form renders it hidden, so a real
+	// visitor never fills it. A non-empty value is treated as a bot.
+	Website string `json:"website"`
+}
+
+// apply is the unauthenticated twin of create, backing the landing page's
+// "connect your wash" form. It runs the same validation, then:
+//   - honeypot filled: answers 202 without storing anything, so a bot learns
+//     nothing from the response;
+//   - an unreviewed (status=new) request with the same phone already exists:
+//     answers 202 without storing a duplicate (double-submits, retries);
+//   - otherwise stores a status=new request.
+//
+// The response never echoes stored data or ids.
+func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
+	var req applyRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	if strings.TrimSpace(req.Website) != "" {
+		httputil.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "received"})
+		return
+	}
+
+	businessName := strings.TrimSpace(req.BusinessName)
+	contactName := strings.TrimSpace(req.ContactName)
+	contactPhone := strings.TrimSpace(req.ContactPhone)
+	address := strings.TrimSpace(req.Address)
+
+	if err := validate(businessName, contactName, contactPhone, address, req.BoxesCount); err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !validPhone(contactPhone) {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_contact_phone", "contact_phone must contain 9 to 15 digits"))
+		return
+	}
+	if req.BoxesCount > maxApplyBoxes {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_boxes_count", "boxes_count is too large"))
+		return
+	}
+
+	var note *string
+	if req.Note != nil {
+		trimmed := strings.TrimSpace(*req.Note)
+		if len(trimmed) > 2000 {
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_note", "note is too long (max 2000 chars)"))
+			return
+		}
+		if trimmed != "" {
+			note = &trimmed
+		}
+	}
+
+	exists, err := h.repo.ExistsNewByPhone(r.Context(), contactPhone)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !exists {
+		c := &ConnectionRequest{
+			BusinessName: businessName,
+			ContactName:  contactName,
+			ContactPhone: contactPhone,
+			Address:      address,
+			BoxesCount:   req.BoxesCount,
+			Note:         note,
+			Status:       StatusNew,
+		}
+		if err := h.repo.Create(r.Context(), c); err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
+	}
+	httputil.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "received"})
+}
+
+// maxApplyBoxes caps boxes_count on the public form; the admin create path
+// is trusted and has no cap.
+const maxApplyBoxes = 100
+
+// validPhone accepts any phone with 9-15 digits (E.164 maximum is 15),
+// ignoring formatting characters like "+", spaces, dashes and brackets.
+func validPhone(s string) bool {
+	digits := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '+' || r == ' ' || r == '-' || r == '(' || r == ')':
+		default:
+			return false
+		}
+	}
+	return digits >= 9 && digits <= 15
 }
 
 type updateStatusRequest struct {

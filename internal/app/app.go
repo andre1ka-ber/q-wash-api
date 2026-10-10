@@ -26,6 +26,7 @@ import (
 	"q-wash-api/internal/platform/httpserver"
 	"q-wash-api/internal/platform/jwt"
 	"q-wash-api/internal/platform/push"
+	"q-wash-api/internal/platform/ratelimit"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
 	"q-wash-api/internal/qrcode"
@@ -143,7 +144,8 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps)
 	notificationHandler.RegisterRoutes(v1, requireAuth, requireStaff...)
 	ownerHandler.RegisterRoutes(v1, requireAdmin...)
-	connectionRequestHandler.RegisterRoutes(v1, requireAdmin...)
+	// Public landing-page form: 10 submissions per IP per hour.
+	connectionRequestHandler.RegisterRoutes(v1, ratelimit.New(10, time.Hour).Middleware, requireAdmin...)
 	adminHandler.RegisterRoutes(v1, requireAdmin...)
 	photoHandler.RegisterRoutes(v1, requireStaff...)
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)

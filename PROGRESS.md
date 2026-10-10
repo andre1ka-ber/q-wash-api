@@ -398,3 +398,14 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   factory, message length); integration spy implements both interfaces.
   `go vet`, `go test ./...` and `go test -tags=integration` clean. NOT yet
   tried against the real Payom API — no account/credentials yet.
+
+## Public connection-request form (2026-10-10)
+
+`POST /connection-requests/apply` — unauthenticated twin of the admin create,
+backing `q-wash-web`'s landing form. Same validation plus phone 9–15 digits and
+`boxes_count` ≤ 100; honeypot field `website`; no duplicate for an already-pending
+phone; always 202 without echoing data. New `internal/platform/ratelimit`
+(stdlib fixed-window per IP, 10/hour, 429 `too_many_requests` + `Retry-After`).
+No migration, no new dependency. Tests: `ratelimit_test.go`, `handler_test.go`
+(phone validation), integration `connection_request_apply_test.go`.
+Docs updated: `API.md`, `openapi.yaml`.
