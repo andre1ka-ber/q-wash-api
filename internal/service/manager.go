@@ -32,6 +32,7 @@ func (m *Manager) CreateService(
 	name string,
 	description *string,
 	durationMinutes int,
+	queueMinutes *int,
 	pictureURL *string,
 	priceOptions []PriceOptionInput,
 ) (*Service, error) {
@@ -45,6 +46,7 @@ func (m *Manager) CreateService(
 		Name:            name,
 		Description:     description,
 		DurationMinutes: durationMinutes,
+		QueueMinutes:    queueMinutes,
 		PictureURL:      pictureURL,
 		IsActive:        true,
 		PriceOptions:    opts,

@@ -67,6 +67,7 @@ type response struct {
 	Name            string                `json:"name"`
 	Description     *string               `json:"description,omitempty"`
 	DurationMinutes int                   `json:"duration_minutes"`
+	QueueMinutes    *int                  `json:"queue_minutes"`
 	PictureURL      *string               `json:"picture_url,omitempty"`
 	IsActive        bool                  `json:"is_active"`
 	PriceOptions    []priceOptionResponse `json:"price_options"`
@@ -83,6 +84,7 @@ func toResponse(svc *Service) response {
 		Name:            svc.Name,
 		Description:     svc.Description,
 		DurationMinutes: svc.DurationMinutes,
+		QueueMinutes:    svc.QueueMinutes,
 		PictureURL:      svc.PictureURL,
 		IsActive:        svc.IsActive,
 		PriceOptions:    options,
@@ -131,6 +133,7 @@ type createRequest struct {
 	Name            string                   `json:"name"`
 	Description     *string                  `json:"description"`
 	DurationMinutes int                      `json:"duration_minutes"`
+	QueueMinutes    *int                     `json:"queue_minutes"`
 	PictureURL      *string                  `json:"picture_url"`
 	PriceOptions    []priceOptionCreateInput `json:"price_options"`
 }
@@ -168,6 +171,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DurationMinutes <= 0 {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_duration", "duration_minutes must be positive"))
+		return
+	}
+	if req.QueueMinutes != nil && *req.QueueMinutes <= 0 {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be positive"))
 		return
 	}
 	if req.PictureURL != nil && len(*req.PictureURL) > 500 {
@@ -214,7 +221,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		description = &d
 	}
 
-	svc, err := h.manager.CreateService(r.Context(), washingPointID, name, description, req.DurationMinutes, req.PictureURL, inputs)
+	svc, err := h.manager.CreateService(r.Context(), washingPointID, name, description, req.DurationMinutes, req.QueueMinutes, req.PictureURL, inputs)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -226,6 +233,7 @@ type updateRequest struct {
 	Name            *string `json:"name"`
 	Description     *string `json:"description"`
 	DurationMinutes *int    `json:"duration_minutes"`
+	QueueMinutes    *int    `json:"queue_minutes"`
 	PictureURL      *string `json:"picture_url"`
 	IsActive        *bool   `json:"is_active"`
 }
@@ -279,6 +287,17 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		svc.DurationMinutes = *req.DurationMinutes
+	}
+	if req.QueueMinutes != nil {
+		switch {
+		case *req.QueueMinutes < 0:
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be positive (0 clears it)"))
+			return
+		case *req.QueueMinutes == 0:
+			svc.QueueMinutes = nil
+		default:
+			svc.QueueMinutes = req.QueueMinutes
+		}
 	}
 	if req.PictureURL != nil {
 		if len(*req.PictureURL) > 500 {

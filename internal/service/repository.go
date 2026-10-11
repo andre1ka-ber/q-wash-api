@@ -106,6 +106,7 @@ func (r *Repository) Update(ctx context.Context, svc *Service) error {
 		"name":             svc.Name,
 		"description":      svc.Description,
 		"duration_minutes": svc.DurationMinutes,
+		"queue_minutes":    svc.QueueMinutes,
 		"picture_url":      svc.PictureURL,
 		"is_active":        svc.IsActive,
 	}).Error

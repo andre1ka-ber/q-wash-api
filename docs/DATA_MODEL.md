@@ -214,7 +214,8 @@ Belongs to one washing point.
 | washing_point_id | uuid | FK -> WashingPoint |
 | name | string | |
 | description | string, nullable | |
-| duration_minutes | int | used for scheduling/end-time calc |
+| duration_minutes | int | shown to customers as the service length |
+| queue_minutes | int, nullable | how long a booking blocks a box (scheduling/end-time calc); NULL = use `duration_minutes` |
 | picture_url | string, nullable | |
 | is_active | bool | default true |
 | created_at / updated_at | timestamp | |
@@ -258,7 +259,7 @@ The booking / queue entry. Central entity tying everything together.
 | washing_point_id | uuid | FK -> WashingPoint, denormalized for query convenience |
 | box_number | int, not null | 1..boxes_count, client-chosen at booking time (validated against `boxes_count` and actual availability, never auto-assigned) |
 | scheduled_start_at | timestamp | requested slot start |
-| scheduled_end_at | timestamp | `scheduled_start_at + service.duration_minutes`, stored for fast overlap queries |
+| scheduled_end_at | timestamp | `scheduled_start_at + COALESCE(service.queue_minutes, service.duration_minutes)`, stored for fast overlap queries |
 | notes | string, nullable | free-text, optional |
 | canceled_at | timestamp, nullable | |
 | paused_at | timestamp, nullable | only meaningful while `status = washing`. Toggled by `PATCH /queue/{id}/pause`/`/resume` (staff/worker/admin, `docs/PLAN_WEB_APPS.md` phase 7) via `queue.Manager.Pause`/`Resume` — 409 `cannot_pause`/`cannot_resume` outside `status = washing` or on a redundant call. Deliberately not a new `status` value: the forward-only state machine below stays untouched. |
@@ -379,9 +380,9 @@ Implemented in Phase 7 as `GET /washing-points/{id}/availability`; the pure swee
 
 Input: `washing_point_id`, `service_id` (+ optional `price_option_id`, duration doesn't vary by price option), `date`.
 
-1. Load washing point (`boxes_count`) and service (`duration_minutes`); resolve the requested date's weekday (`queue.weekdayIndex`, 0=Monday..6=Sunday) and its `WashingPointSchedule` row. A closed day, or a washing point with no schedule row for that weekday, immediately returns an empty result — never falls back to any assumed hours.
+1. Load washing point (`boxes_count`) and service (`queue_minutes`, else `duration_minutes`); resolve the requested date's weekday (`queue.weekdayIndex`, 0=Monday..6=Sunday) and its `WashingPointSchedule` row. A closed day, or a washing point with no schedule row for that weekday, immediately returns an empty result — never falls back to any assumed hours.
 2. Load all non-canceled queue rows for that washing point whose interval overlaps `[schedule_open, schedule_close)` for the requested date, tagged with which `box_number` each occupies. No cross-midnight look-back is needed: since `close_time > open_time` is enforced at write time (both for the flat legacy columns and for schedule rows via `schedule.Manager.Replace`'s validation) and a booking can't be created past close, every booking is fully contained within a single calendar day by construction.
-3. Generate candidate start times at a fixed step (15 minutes) from each open sub-window's start to its `close - duration_minutes` — one pass per window when a break splits the day into two.
+3. Generate candidate start times at a fixed step (15 minutes) from each open sub-window's start to its `close - queue_minutes` (`duration_minutes` when unset) — one pass per window when a break splits the day into two.
 4. For each candidate `[start, start+duration)`, compute which specific box numbers are free — occupied by no busy interval overlapping that window — and keep the candidate only if at least one is.
 5. Return the list of `{start, end, available_boxes}`, letting the client offer the user a choice of box rather than the server picking one.
 

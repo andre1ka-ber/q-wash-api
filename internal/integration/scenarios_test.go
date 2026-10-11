@@ -358,6 +358,42 @@ func TestBooking_DoubleBookingPreventionAndCancelRebook(t *testing.T) {
 	})
 }
 
+func TestBooking_QueueMinutesOverridesDurationForEndTime(t *testing.T) {
+	env := newTestEnv(t)
+	staffPhone := uniquePhone(46)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	adminAccess := env.loginAs(t, uniquePhone(47), user.RoleAdmin)
+	customerAccess := env.loginAs(t, uniquePhone(48), "")
+
+	fixture := env.setUpBookingFixture(t, adminAccess, staffPhone)
+	carID := env.createCar(t, customerAccess, "My Car")
+
+	patch := env.do(t, http.MethodPatch, "/api/v1/services/"+fixture.serviceID, fixture.staffAccess, map[string]any{"queue_minutes": 60})
+	if patch.status != http.StatusOK {
+		t.Fatalf("set queue_minutes: expected 200, got %d (%v)", patch.status, patch.body)
+	}
+
+	startAt := futureBookingTime(2)
+	booking := env.do(t, http.MethodPost, "/api/v1/queue", customerAccess, map[string]any{
+		"car_id": carID, "service_id": fixture.serviceID, "box_number": 1,
+		"price_option_id": fixture.priceOptionID, "scheduled_start_at": startAt,
+	})
+	if booking.status != http.StatusCreated {
+		t.Fatalf("booking: expected 201, got %d (%v)", booking.status, booking.body)
+	}
+	start, err := time.Parse(time.RFC3339, booking.str("scheduled_start_at"))
+	if err != nil {
+		t.Fatalf("parse start: %v", err)
+	}
+	end, err := time.Parse(time.RFC3339, booking.str("scheduled_end_at"))
+	if err != nil {
+		t.Fatalf("parse end: %v", err)
+	}
+	if got := end.Sub(start); got != 60*time.Minute {
+		t.Errorf("expected booking to block 60m (queue_minutes), got %v", got)
+	}
+}
+
 func TestQueue_ForwardOnlyStatusTransitions(t *testing.T) {
 	env := newTestEnv(t)
 	staffPhone := uniquePhone(6)

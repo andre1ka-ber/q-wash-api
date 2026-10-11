@@ -463,7 +463,7 @@ paths:
         resolved per-weekday schedule window(s) (see GET/PUT
         .../schedule) — two disjoint windows on a day with a break, none
         on a closed day. A slot appears only if the service's
-        duration_minutes fits before the window's close and at least one
+        queue_minutes (duration_minutes when unset) fits before the window's close and at least one
         box is free for the whole [start, end); available_boxes lists
         which ones, for the client to offer a box choice. Timestamps are
         anchored to the fixed Asia/Dushanbe business timezone, not UTC.
@@ -2241,6 +2241,11 @@ components:
         name: { type: string }
         description: { type: string, nullable: true }
         duration_minutes: { type: integer, minimum: 1 }
+        queue_minutes:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: How long a booking blocks a box; null means duration_minutes is used.
         picture_url: { type: string, nullable: true }
         is_active: { type: boolean }
         price_options:
@@ -2260,6 +2265,7 @@ components:
         name: { type: string, maxLength: 255 }
         description: { type: string, maxLength: 2000 }
         duration_minutes: { type: integer, minimum: 1 }
+        queue_minutes: { type: integer, minimum: 1, description: Optional; defaults to duration_minutes when omitted. }
         picture_url: { type: string, maxLength: 500 }
         price_options:
           type: array
@@ -2273,6 +2279,7 @@ components:
         name: { type: string, maxLength: 255 }
         description: { type: string, maxLength: 2000 }
         duration_minutes: { type: integer, minimum: 1 }
+        queue_minutes: { type: integer, minimum: 0, description: 0 clears the override (back to duration_minutes). }
         picture_url: { type: string, maxLength: 500 }
         is_active: { type: boolean }
 

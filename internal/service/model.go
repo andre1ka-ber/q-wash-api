@@ -13,6 +13,7 @@ type Service struct {
 	Name            string    `gorm:"type:varchar(255);not null"`
 	Description     *string   `gorm:"type:text"`
 	DurationMinutes int       `gorm:"not null"`
+	QueueMinutes    *int      `gorm:"type:integer"`
 	PictureURL      *string   `gorm:"type:varchar(500)"`
 	IsActive        bool      `gorm:"not null;default:true"`
 	CreatedAt       time.Time
@@ -22,6 +23,15 @@ type Service struct {
 }
 
 func (Service) TableName() string { return "services" }
+
+// EffectiveQueueMinutes is how long a booking of this service blocks a box:
+// QueueMinutes when set, otherwise DurationMinutes.
+func (s *Service) EffectiveQueueMinutes() int {
+	if s.QueueMinutes != nil {
+		return *s.QueueMinutes
+	}
+	return s.DurationMinutes
+}
 
 func (s *Service) BeforeCreate(tx *gorm.DB) error {
 	if s.ID == uuid.Nil {

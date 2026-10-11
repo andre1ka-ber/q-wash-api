@@ -188,7 +188,7 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	duration := time.Duration(svc.DurationMinutes) * time.Minute
+	duration := time.Duration(svc.EffectiveQueueMinutes()) * time.Minute
 	slots := ComputeAvailableSlotsForDay(daySchedule, wp.BoxesCount, duration, busy)
 
 	items := make([]slotResponse, len(slots))

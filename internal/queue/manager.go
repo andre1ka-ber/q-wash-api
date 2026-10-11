@@ -126,7 +126,7 @@ func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid
 		return nil, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be in the future")
 	}
 
-	end := start.Add(time.Duration(svc.DurationMinutes) * time.Minute)
+	end := start.Add(time.Duration(svc.EffectiveQueueMinutes()) * time.Minute)
 
 	weekday := weekdayIndex(start.In(clock.BusinessLocation))
 	scheduleRow, err := m.scheduleRepo.FindByWeekday(ctx, wp.ID, weekday)

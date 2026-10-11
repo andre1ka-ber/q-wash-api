@@ -192,8 +192,8 @@ Photo response:
 |---|---|---|---|
 | GET | `/washing-points/{id}/services` | public | `{items: [...]}`, each with nested `price_options` |
 | GET | `/services/{id}` | public | detail; 404 `service_not_found` |
-| POST | `/washing-points/{id}/services` | staff, admin | body: `{name, description?, duration_minutes, picture_url?, price_options: [{name, price_cents, is_default?}, ...]}`. `price_options` non-empty is required; if none is marked `is_default`, the first is auto-promoted; more than one marked default is 400 `multiple_default_price_options`. |
-| PATCH | `/services/{id}` | staff, admin | partial update of the service's own fields (not price options) |
+| POST | `/washing-points/{id}/services` | staff, admin | body: `{name, description?, duration_minutes, queue_minutes?, picture_url?, price_options: [{name, price_cents, is_default?}, ...]}`. `queue_minutes` (optional, > 0, else 400 `invalid_queue_minutes`) is how long a booking blocks a box; unset = `duration_minutes`. `price_options` non-empty is required; if none is marked `is_default`, the first is auto-promoted; more than one marked default is 400 `multiple_default_price_options`. |
+| PATCH | `/services/{id}` | staff, admin | partial update of the service's own fields (not price options); `queue_minutes: 0` clears the override |
 | DELETE | `/services/{id}` | staff, admin | sets `is_active=false`; 204 |
 | POST | `/services/{id}/price-options` | staff, admin | body: `{name, price_cents, is_default?}`. If `is_default: true`, any existing default for that service is unset first. |
 | PATCH | `/price-options/{id}` | staff, admin | partial update. Explicitly setting `is_default: false` on the current sole default is rejected — 400 `cannot_unset_default`; mark another one default instead. |

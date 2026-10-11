@@ -134,6 +134,31 @@ func TestServices_CRUDPriceOptionsAndOwnership(t *testing.T) {
 		}
 	})
 
+	t.Run("queue_minutes: optional, validated, 0 clears on update", func(t *testing.T) {
+		po := []map[string]any{{"name": "Standard", "price_cents": 100}}
+		bad := env.do(t, http.MethodPost, listPath, staff, map[string]any{"name": "X", "duration_minutes": 30, "queue_minutes": 0, "price_options": po})
+		if bad.status != http.StatusBadRequest || errCode(bad) != "invalid_queue_minutes" {
+			t.Fatalf("create with queue_minutes 0: expected 400 invalid_queue_minutes, got %d (%v)", bad.status, bad.body)
+		}
+		created := env.do(t, http.MethodPost, listPath, staff, map[string]any{"name": "Express", "duration_minutes": 30, "queue_minutes": 60, "price_options": po})
+		if created.status != http.StatusCreated || created.body["queue_minutes"] != float64(60) {
+			t.Fatalf("create: %d (%v)", created.status, created.body)
+		}
+		expressPath := "/api/v1/services/" + created.str("id")
+		if r := env.do(t, http.MethodPatch, expressPath, staff, map[string]any{"queue_minutes": -1}); r.status != http.StatusBadRequest || errCode(r) != "invalid_queue_minutes" {
+			t.Errorf("negative: expected 400 invalid_queue_minutes, got %d (%v)", r.status, r.body)
+		}
+		if r := env.do(t, http.MethodPatch, expressPath, staff, map[string]any{"queue_minutes": 90}); r.status != http.StatusOK || r.body["queue_minutes"] != float64(90) {
+			t.Errorf("set: %d (%v)", r.status, r.body)
+		}
+		if r := env.do(t, http.MethodPatch, expressPath, staff, map[string]any{"queue_minutes": 0}); r.status != http.StatusOK || r.body["queue_minutes"] != nil {
+			t.Errorf("clear: expected null queue_minutes, got %d (%v)", r.status, r.body)
+		}
+		if got := env.do(t, http.MethodGet, svcPath, "", nil); got.body["queue_minutes"] != nil {
+			t.Errorf("service without queue_minutes must report null, got %v", got.body["queue_minutes"])
+		}
+	})
+
 	t.Run("price options: default handling, last-one and in-use guards", func(t *testing.T) {
 		add := env.do(t, http.MethodPost, svcPath+"/price-options", staff, map[string]any{"name": "SUV", "price_cents": 900, "is_default": true})
 		if add.status != http.StatusCreated || add.body["is_default"] != true {
