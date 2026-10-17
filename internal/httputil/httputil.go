@@ -46,12 +46,24 @@ func errorBody(code, message string) map[string]any {
 	return map[string]any{"error": map[string]string{"code": code, "message": message}}
 }
 
+// MaxJSONBodyBytes caps a JSON request body; every JSON endpoint here takes a
+// small object, so 1 MiB is generous. Photo uploads are multipart and set
+// their own limit.
+const MaxJSONBodyBytes = 1 << 20
+
 // DecodeJSON decodes the request body into v, rejecting unknown fields so
-// clients get an early error instead of silently ignored typos.
+// clients get an early error instead of silently ignored typos. A body over
+// MaxJSONBodyBytes is refused with 413 request_too_large.
 func DecodeJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
+	// A nil ResponseWriter is allowed: it is only used to ask the server to
+	// close the connection after an over-limit body.
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, MaxJSONBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return apperror.New(http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large")
+		}
 		return apperror.BadRequest("invalid_body", "invalid request body")
 	}
 	return nil

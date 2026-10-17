@@ -356,7 +356,9 @@ paths:
         `close_time` must stay after `open_time`). Staff may only act on
         their own washing point (`User.washing_point_id`) — 404 for any
         other point, same as a nonexistent id. Admin has no such
-        restriction.
+        restriction. `status` and `owner_id` are admin-only: a staff
+        request that includes either field is rejected with 403
+        `forbidden` and nothing is changed.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true

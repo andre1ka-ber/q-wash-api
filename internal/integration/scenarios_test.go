@@ -235,6 +235,54 @@ func TestRBAC_WashingPointManagement(t *testing.T) {
 	})
 }
 
+// A point's own staff may edit its details but not decide its network-level
+// state: status (e.g. approving themselves out of pending_review) and owner.
+func TestRBAC_StaffCannotChangeStatusOrOwner(t *testing.T) {
+	env := newTestEnv(t)
+	staffPhone := uniquePhone(60)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	adminAccess := env.loginAs(t, uniquePhone(61), user.RoleAdmin)
+	fixture := env.setUpBookingFixture(t, adminAccess, staffPhone)
+	path := "/api/v1/washing-points/" + fixture.washingPointID
+
+	t.Run("staff cannot change status", func(t *testing.T) {
+		resp := env.do(t, http.MethodPatch, path, fixture.staffAccess, map[string]any{"status": "paused"})
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("staff cannot change or clear owner_id", func(t *testing.T) {
+		for _, ownerID := range []string{"", "00000000-0000-0000-0000-000000000001"} {
+			resp := env.do(t, http.MethodPatch, path, fixture.staffAccess, map[string]any{"owner_id": ownerID})
+			if resp.status != http.StatusForbidden {
+				t.Fatalf("owner_id %q: expected 403, got %d (%v)", ownerID, resp.status, resp.body)
+			}
+		}
+	})
+
+	t.Run("staff can still edit ordinary details", func(t *testing.T) {
+		resp := env.do(t, http.MethodPatch, path, fixture.staffAccess, map[string]any{"name": "Renamed By Staff"})
+		if resp.status != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("status was not changed by the rejected requests", func(t *testing.T) {
+		resp := env.do(t, http.MethodGet, path, "", nil)
+		if resp.status != http.StatusOK || resp.str("status") != "active" {
+			t.Fatalf("expected status active, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("admin can change status", func(t *testing.T) {
+		resp := env.do(t, http.MethodPatch, path, adminAccess, map[string]any{"status": "paused"})
+		if resp.status != http.StatusOK || resp.str("status") != "paused" {
+			t.Fatalf("expected 200 paused, got %d (%v)", resp.status, resp.body)
+		}
+	})
+}
+
 // bookingFixture creates a washing point (boxes_count=1, to make the
 // double-booking test need only two requests) and one service with one
 // price option through the real HTTP API. Creating a point is admin-only

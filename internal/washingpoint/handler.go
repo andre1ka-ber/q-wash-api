@@ -314,6 +314,14 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// status and owner_id are network-level decisions: a point's own staff
+	// must not be able to approve it out of pending_review or hand it to
+	// another owner.
+	if authUser.Role != "admin" && (req.Status != nil || req.OwnerID != nil) {
+		httputil.WriteError(w, r, apperror.Forbidden("forbidden", "only admin can change status or owner_id"))
+		return
+	}
+
 	if req.Name != nil {
 		wp.Name = strings.TrimSpace(*req.Name)
 	}
