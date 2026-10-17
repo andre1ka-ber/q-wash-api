@@ -8,7 +8,7 @@ import (
 
 func remoteAddrSeenBy(t *testing.T, trust bool, headers map[string]string) string {
 	t.Helper()
-	r, _ := NewRouter(nil, []string{"*"}, "", trust)
+	r, _ := NewRouter(nil, []string{"*"}, "", trust, false)
 	// /health needs a DB; use a bare route on the root router instead.
 	var got string
 	r.Get("/ip", func(_ http.ResponseWriter, req *http.Request) { got = req.RemoteAddr })

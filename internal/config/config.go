@@ -133,6 +133,7 @@ type MonitoringConfig struct {
 const (
 	devAccessSecret  = "dev-access-secret-change-me"
 	devRefreshPepper = "dev-refresh-pepper-change-me"
+	devDBPassword    = "pegasus"
 	minSecretLen     = 32
 )
 
@@ -162,6 +163,9 @@ func (c Config) Validate() error {
 	}
 	check("JWT_ACCESS_SECRET", c.Auth.AccessTokenSecret, devAccessSecret)
 	check("REFRESH_TOKEN_PEPPER", c.Auth.RefreshTokenPepper, devRefreshPepper)
+	if c.DB.Password == devDBPassword {
+		problems = append(problems, "DB_PASSWORD is still the built-in dev default")
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("unsafe production configuration: %s", strings.Join(problems, "; "))
 	}
@@ -181,6 +185,9 @@ func (r RateLimitConfig) validate() error {
 func (c Config) Warnings() []string {
 	var warnings []string
 	if c.IsProduction() {
+		if c.DB.SSLMode == "disable" {
+			warnings = append(warnings, "DB_SSLMODE=disable in production: the database connection is unencrypted; acceptable only if Postgres is reachable over a private network (e.g. the same Docker network)")
+		}
 		if !c.HTTP.TrustProxyHeaders {
 			warnings = append(warnings, "TRUST_PROXY_HEADERS is off in production: client IPs are the TCP peer's, so behind a reverse proxy every user shares one rate-limit bucket; set TRUST_PROXY_HEADERS=true if (and only if) your proxy overwrites X-Forwarded-For")
 		}
@@ -205,7 +212,7 @@ func Load() (Config, error) {
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", "pegasus"),
-			Password: getEnv("DB_PASSWORD", "pegasus"),
+			Password: getEnv("DB_PASSWORD", devDBPassword),
 			Name:     getEnv("DB_NAME", "pegasus"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},

@@ -1,6 +1,6 @@
 # Plan: security hardening from the OWASP audit (2026-10-17)
 
-Status: **approved 2026-10-17; phases 1-3 done, phases 4-6 pending** (docs/rules/general.md §12). Progress in
+Status: **approved 2026-10-17; phases 1-4 done, phases 5-6 pending** (docs/rules/general.md §12). Progress in
 `progress-security-hardening.md`. Open decisions below (token_version vs TTL, proxy flag, `/docs`, limits,
 phase 6 go-ahead) were not answered at approval; they are asked again before each affected phase.
 Primary subproject: `q-wash-api`. Smaller items touch `q-wash-web` and deploy/infra config; those are

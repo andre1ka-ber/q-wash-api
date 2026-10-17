@@ -56,7 +56,8 @@ staff and worker accounts are both scoped to the seeded washing point via
 ## API docs
 
 Interactive Swagger UI: **http://localhost:8080/docs** (once `make run` is
-up). Raw spec at `GET /openapi.yaml`, source at
+up; not served when `APP_ENV=production`, because the page loads its scripts
+from a public CDN). Raw spec at `GET /openapi.yaml` (always served), source at
 [`docs/openapi.yaml`](docs/openapi.yaml). "Try it out" hits this same
 server — click Authorize and paste an access token from `/auth/otp/verify`
 to exercise the protected routes.

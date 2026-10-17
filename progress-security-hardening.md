@@ -1,6 +1,6 @@
 # Progress: security hardening (plan-security-hardening.md)
 
-Plan approved 2026-10-17. Phases 1-3 done; phases 4-6 not started.
+Plan approved 2026-10-17. Phases 1-4 done; phases 5-6 not started.
 
 ## Phase 1: access control and request limits (#2, #5): done 2026-10-17
 
@@ -81,3 +81,23 @@ Decision (user, 2026-10-17) for #4: short TTL for staff roles, no `token_version
   events present and free of passwords/tokens).
 - Docs: `docs/API.md` ("Session lifetime and audit log"), `README.md`.
 - Not done: `.env.example` (cannot be edited from this session): add `JWT_STAFF_ACCESS_TTL=5m`.
+
+## Phase 4: headers, config, docs endpoint (#7 API part, #8, #10): done 2026-10-17
+
+Decisions (user, 2026-10-17): #8 disable `/docs` in production; #10 refuse to start with the default DB password.
+
+- #7 (API part): new `securityHeaders` middleware: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer` on every response, `Strict-Transport-Security: max-age=31536000` in
+  production. `/uploads/*` additionally gets `Content-Security-Policy: default-src 'none'; sandbox`. No global
+  CSP: the QR scan page is HTML with an inline style. `NewRouter` gained a `production` parameter.
+  Not done (phase 6, needs go-ahead): CSP/headers for the web apps and `q-wash-web`, which are served by
+  something outside this repo.
+- #8: `GET /docs` is not registered when `APP_ENV=production` (404); `GET /openapi.yaml` stays. Plan
+  alternative (pin + SRI) was not chosen.
+- #10: production now refuses to start when `DB_PASSWORD` is the dev default `pegasus` (same check as the JWT
+  secrets), and logs a startup warning for `DB_SSLMODE=disable`. **Deploy note:** if the production `.env`
+  still has `DB_PASSWORD=pegasus`, the next deploy will fail to start until it is changed (and the Postgres
+  user's password changed to match).
+- Tests: `httpserver/headers_test.go` (headers on/off per environment, `/docs` dev vs production, upload CSP),
+  `config_test.go` (DB password refusal, sslmode warning, Load paths now set `DB_PASSWORD`).
+- Docs: `docs/API.md` (conventions, `/docs` note), `README.md`, platform `docs/links.md` (`/docs` is dev-only).

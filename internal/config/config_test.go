@@ -32,6 +32,18 @@ func TestValidate(t *testing.T) {
 		}
 	})
 
+	t.Run("production refuses the built-in dev DB password", func(t *testing.T) {
+		c := production()
+		c.DB.Password = devDBPassword
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "DB_PASSWORD") {
+			t.Fatalf("expected a DB_PASSWORD error, got %v", err)
+		}
+		c.DB.Password = "a-real-database-password"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("a non-default password must pass, got %v", err)
+		}
+	})
+
 	t.Run("production refuses secrets that are too short", func(t *testing.T) {
 		c := production()
 		c.Auth.AccessTokenSecret = "short"
@@ -65,6 +77,12 @@ func TestWarnings(t *testing.T) {
 	}
 	c.HTTP.TrustProxyHeaders = true
 
+	c.DB.SSLMode = "disable"
+	if got := c.Warnings(); len(got) != 1 || !strings.Contains(got[0], "DB_SSLMODE") {
+		t.Fatalf("expected an unencrypted-DB warning in production, got %v", got)
+	}
+	c.DB.SSLMode = "require"
+
 	c.HTTP.CORSAllowedOrigins = []string{"https://cabinet.example.com"}
 	if got := c.Warnings(); len(got) != 0 {
 		t.Fatalf("locked-down origins should not warn, got %v", got)
@@ -86,6 +104,11 @@ func TestLoadAppliesValidation(t *testing.T) {
 
 	t.Setenv("JWT_ACCESS_SECRET", goodSecret)
 	t.Setenv("REFRESH_TOKEN_PEPPER", goodSecret)
+	if _, err := Load(); err == nil {
+		t.Fatal("Load must fail for production with the default DB password")
+	}
+
+	t.Setenv("DB_PASSWORD", "a-real-database-password")
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load with real secrets: %v", err)
 	}
@@ -101,6 +124,7 @@ func TestLoadProxyTrustAndRateLimits(t *testing.T) {
 		t.Setenv("APP_ENV", "production")
 		t.Setenv("JWT_ACCESS_SECRET", goodSecret)
 		t.Setenv("REFRESH_TOKEN_PEPPER", goodSecret)
+		t.Setenv("DB_PASSWORD", "a-real-database-password")
 		cfg, err = Load()
 		if err != nil || cfg.HTTP.TrustProxyHeaders {
 			t.Fatalf("production: trust=%v err=%v", cfg.HTTP.TrustProxyHeaders, err)

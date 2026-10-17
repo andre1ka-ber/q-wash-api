@@ -53,7 +53,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	if cfg.IsProduction() {
 		sentryDSN = cfg.Monitoring.DSN
 	}
-	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN, cfg.HTTP.TrustProxyHeaders)
+	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN, cfg.HTTP.TrustProxyHeaders, cfg.IsProduction())
 	httpserver.MountStatic(router, cfg.Storage.BaseURL, cfg.Storage.Dir)
 
 	jwtManager := jwt.NewManager(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenTTL).

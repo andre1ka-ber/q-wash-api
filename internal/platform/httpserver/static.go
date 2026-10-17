@@ -43,5 +43,11 @@ func (fs noListingFS) Open(name string) (http.File, error) {
 func MountStatic(r chi.Router, baseURL, dir string) {
 	prefix := strings.TrimSuffix(baseURL, "/")
 	fileServer := http.StripPrefix(prefix, http.FileServer(noListingFS{http.Dir(dir)}))
-	r.Handle(prefix+"/*", fileServer)
+	// Uploads are plain images. A CSP with nothing allowed and a sandbox means
+	// that even if a non-image ever landed here and a browser rendered it, it
+	// could not run script or load anything.
+	r.Handle(prefix+"/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		fileServer.ServeHTTP(w, req)
+	}))
 }

@@ -33,13 +33,18 @@ import (
 // the forwarded headers of the one reverse proxy in front of the API (see
 // clientip.go). Off, RemoteAddr stays the TCP peer, so a client cannot choose
 // its own IP and dodge the per-IP rate limits.
-func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string, trustProxyHeaders bool) (*chi.Mux, chi.Router) {
+//
+// production turns on Strict-Transport-Security and leaves out GET /docs: the
+// Swagger UI page pulls its scripts from a public CDN, which is not something
+// to serve from the production API origin. GET /openapi.yaml stays.
+func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string, trustProxyHeaders, production bool) (*chi.Mux, chi.Router) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
 	if trustProxyHeaders {
 		r.Use(proxyClientIP)
 	}
+	r.Use(securityHeaders(production))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(monitoring.Middleware(sentryDSN))
@@ -54,7 +59,9 @@ func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string,
 
 	r.Get("/health", healthHandler(database))
 	r.Get("/openapi.yaml", openapiSpecHandler)
-	r.Get("/docs", swaggerUIHandler)
+	if !production {
+		r.Get("/docs", swaggerUIHandler)
+	}
 
 	v1 := chi.NewRouter()
 	r.Mount("/api/v1", v1)

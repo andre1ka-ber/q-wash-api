@@ -4,7 +4,7 @@ Base path: `/api/v1`. JSON in/out. Auth via `Authorization: Bearer <access_token
 
 Status: skeleton — filled in as each phase lands. Request/response bodies get exact field lists once the corresponding phase is implemented.
 
-This is the prose companion to the machine-readable spec: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0.3), served at runtime as `GET /openapi.yaml` with an interactive Swagger UI at `GET /docs`. The two are meant to agree; if they ever drift, this file's "why" (rationale, edge cases, non-obvious defaults) still belongs here even after everything is implemented — the spec captures shapes and status codes, not reasoning.
+This is the prose companion to the machine-readable spec: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0.3), served at runtime as `GET /openapi.yaml` with an interactive Swagger UI at `GET /docs` (404 when `APP_ENV=production`; the spec itself is always served). The two are meant to agree; if they ever drift, this file's "why" (rationale, edge cases, non-obvious defaults) still belongs here even after everything is implemented — the spec captures shapes and status codes, not reasoning.
 
 ## Auth — implemented (Phase 3)
 
@@ -498,5 +498,6 @@ Detail/response shape (list items omit `stats`):
 ## Conventions
 
 - Errors: `{"error": {"code": "string", "message": "string"}}`, HTTP status matches the error class (400 validation, 401/403 auth, 404 not found, 409 conflict e.g. slot no longer available, 422 business-rule violation, 413 `request_too_large` for a JSON body over 1 MiB — photo uploads have their own 10 MiB limit, see Photos).
+- Response headers: every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`; with `APP_ENV=production` also `Strict-Transport-Security: max-age=31536000`. Files under `/uploads/` additionally get `Content-Security-Policy: default-src 'none'; sandbox`.
 - Pagination: `?page=&page_size=` (both optional, 1-indexed; implemented in `httputil.ParsePagination`/`WritePaginated`, currently used by `GET /me/queue`). Defaults: `page=1`, `page_size=20`; `page_size` is clamped to 100. Invalid values (non-numeric, zero, negative) fall back to the default rather than erroring — pagination params are a convenience, not worth rejecting a request over. Response wraps the list as `{"items": [...], "page": N, "page_size": N, "total": N}`.
 - Timestamps: RFC3339, real absolute instants. Most are UTC (Postgres `timestamptz` defaults); `queue.scheduled_start_at`/`scheduled_end_at` and `availability` slot `start`/`end` are anchored to the `Asia/Dushanbe` business timezone instead when derived from a washing point's `open_time`/`close_time` (see the Washing Points section) — clients should parse and convert to local time for display rather than assume a `Z` suffix.
