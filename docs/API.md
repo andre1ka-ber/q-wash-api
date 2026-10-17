@@ -31,6 +31,25 @@ Token pair response shape (returned by verify/login/refresh):
 There is no API endpoint to set an arbitrary username for a user — same as role promotion, that's a direct-DB operation by design (see `docs/DATA_MODEL.md`). Every washing point's staff/worker accounts are auto-provisioned on creation instead (see "Washing point credentials" below); their password can be changed by the account itself via `PATCH /auth/password` above (knows the current password) or reset to a new random one via the credential-reset endpoint (their own point's staff, or admin — doesn't need to know the old password, e.g. for a forgotten one). `cmd/seed` separately sets dev-only credentials for the seeded admin account.
 Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, verified statelessly (no DB hit) by `auth.RequireAuth` middleware. Refresh tokens are opaque random strings, stored HMAC-hashed, never JWTs — so individual sessions can be revoked. Role-gated routes (Phase 4+) use `auth.RequireRole("staff", "admin")` chained after `RequireAuth`.
 
+### Abuse limits — implemented (`plan-security-hardening.md` phase 2)
+
+In-memory and per API process (several replicas each count separately). Every rejection is 429 with the standard error envelope; per-IP ones carry `Retry-After`. Defaults are env-configurable (`RATE_LIMIT_*`); `0` turns a limit off.
+
+| endpoint | limit | env var (default) | error |
+|---|---|---|---|
+| `POST /auth/login` | per client IP | `RATE_LIMIT_LOGIN_PER_MINUTE` (10 / minute) | `too_many_requests` |
+| `POST /auth/login` | consecutive wrong passwords per username (case-insensitive, existing or not) → locked, even for the right password | `RATE_LIMIT_LOGIN_MAX_FAILURES` (5), `RATE_LIMIT_LOGIN_LOCKOUT` (15m) | `login_locked` |
+| `POST /auth/otp/request` | per client IP, on top of the per-phone `otp_cooldown` | `RATE_LIMIT_OTP_REQUEST_PER_HOUR` (5 / hour) | `too_many_requests` |
+| `POST /auth/otp/verify` | per client IP, on top of the per-code `OTP_MAX_ATTEMPTS` | `RATE_LIMIT_OTP_VERIFY_PER_HOUR` (20 / hour) | `too_many_requests` |
+| `GET /q/{token}`, `GET /qr-codes/scan/{token}` | per client IP, one shared budget | `RATE_LIMIT_QR_SCAN_PER_MINUTE` (60 / minute) | `too_many_requests` |
+| `POST /connection-requests/apply` | per client IP (unchanged) | fixed 10 / hour | `too_many_requests` |
+
+Notes:
+- A successful login resets that username's failure count. A lockout expires by itself; it also means someone who knows a username can lock that account out for the lockout period (a trade-off against online password guessing — the lock cannot be used to learn whether a username exists, since unknown names lock too).
+- Customers on one mobile carrier's shared (NAT) address share a per-IP budget. If real users get `too_many_requests` on OTP, raise `RATE_LIMIT_OTP_REQUEST_PER_HOUR` rather than turning it off.
+- **Client IP:** with `TRUST_PROXY_HEADERS=true` the IP is the **rightmost** entry of `X-Forwarded-For` (the one the single trusted reverse proxy appended), falling back to `X-Real-IP`; otherwise it is the TCP peer. Default: on outside production, **off in production** — so a production deploy behind a reverse proxy must set `TRUST_PROXY_HEADERS=true`, or all users share the proxy's bucket (the API logs a startup warning). Only one proxy hop is supported. See `docs/edge-cases.md` in the platform repo.
+- Login also performs a dummy password hash comparison for an unknown username (or one with no password), so response time does not reveal which usernames exist.
+
 ## Users — implemented (Phase 3)
 
 | method | path | role | notes |

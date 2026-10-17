@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const goodSecret = "0123456789abcdef0123456789abcdef" // 32 chars
@@ -51,10 +52,18 @@ func TestValidate(t *testing.T) {
 
 func TestWarnings(t *testing.T) {
 	c := production()
+	c.HTTP.TrustProxyHeaders = true
 	c.HTTP.CORSAllowedOrigins = []string{"*"}
 	if got := c.Warnings(); len(got) != 1 || !strings.Contains(got[0], "CORS_ALLOWED_ORIGINS") {
 		t.Fatalf("expected a CORS warning, got %v", got)
 	}
+
+	c.HTTP.TrustProxyHeaders = false
+	c.HTTP.CORSAllowedOrigins = []string{"https://cabinet.example.com"}
+	if got := c.Warnings(); len(got) != 1 || !strings.Contains(got[0], "TRUST_PROXY_HEADERS") {
+		t.Fatalf("expected a proxy-trust warning in production, got %v", got)
+	}
+	c.HTTP.TrustProxyHeaders = true
 
 	c.HTTP.CORSAllowedOrigins = []string{"https://cabinet.example.com"}
 	if got := c.Warnings(); len(got) != 0 {
@@ -80,6 +89,59 @@ func TestLoadAppliesValidation(t *testing.T) {
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load with real secrets: %v", err)
 	}
+}
+
+func TestLoadProxyTrustAndRateLimits(t *testing.T) {
+	t.Run("defaults: proxy trusted in development, not in production", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil || !cfg.HTTP.TrustProxyHeaders {
+			t.Fatalf("development: trust=%v err=%v", cfg.HTTP.TrustProxyHeaders, err)
+		}
+
+		t.Setenv("APP_ENV", "production")
+		t.Setenv("JWT_ACCESS_SECRET", goodSecret)
+		t.Setenv("REFRESH_TOKEN_PEPPER", goodSecret)
+		cfg, err = Load()
+		if err != nil || cfg.HTTP.TrustProxyHeaders {
+			t.Fatalf("production: trust=%v err=%v", cfg.HTTP.TrustProxyHeaders, err)
+		}
+
+		t.Setenv("TRUST_PROXY_HEADERS", "true")
+		cfg, err = Load()
+		if err != nil || !cfg.HTTP.TrustProxyHeaders {
+			t.Fatalf("explicit true: trust=%v err=%v", cfg.HTTP.TrustProxyHeaders, err)
+		}
+	})
+
+	t.Run("an invalid boolean is an error", func(t *testing.T) {
+		t.Setenv("TRUST_PROXY_HEADERS", "maybe")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+
+	t.Run("rate-limit defaults", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := RateLimitConfig{LoginPerMinute: 10, LoginMaxFailures: 5, LoginLockout: 15 * time.Minute, OTPRequestPerHour: 5, OTPVerifyPerHour: 20, QRScanPerMinute: 60}
+		if cfg.RateLimit != want {
+			t.Fatalf("got %+v, want %+v", cfg.RateLimit, want)
+		}
+	})
+
+	t.Run("0 turns a limit off, negative is refused", func(t *testing.T) {
+		t.Setenv("RATE_LIMIT_QR_SCAN_PER_MINUTE", "0")
+		cfg, err := Load()
+		if err != nil || cfg.RateLimit.QRScanPerMinute != 0 {
+			t.Fatalf("0: got %+v err=%v", cfg.RateLimit, err)
+		}
+		t.Setenv("RATE_LIMIT_QR_SCAN_PER_MINUTE", "-1")
+		if _, err := Load(); err == nil {
+			t.Fatal("negative limit must be refused")
+		}
+	})
 }
 
 func TestLoadMonitoring(t *testing.T) {

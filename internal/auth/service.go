@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ import (
 	"q-wash-api/internal/config"
 	"q-wash-api/internal/platform/jwt"
 	"q-wash-api/internal/platform/password"
+	"q-wash-api/internal/platform/ratelimit"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/user"
 )
@@ -104,6 +106,29 @@ type Service struct {
 	sms        sms.OTPSender
 	jwtManager *jwt.Manager
 	cfg        config.AuthConfig
+
+	// loginLockout locks a username after repeated wrong passwords. nil
+	// (the default) means no lockout.
+	loginLockout *ratelimit.Lockout
+}
+
+// SetLoginLockout enables the per-username lockout on password login.
+func (s *Service) SetLoginLockout(l *ratelimit.Lockout) { s.loginLockout = l }
+
+var (
+	dummyHashOnce sync.Once
+	dummyHash     []byte
+)
+
+// burnPasswordCompare spends the same bcrypt time as a real password check,
+// so a login for a username that does not exist (or has no password) takes as
+// long as one for a real account and the response time does not reveal which
+// usernames exist.
+func burnPasswordCompare(password string) {
+	dummyHashOnce.Do(func() {
+		dummyHash, _ = bcrypt.GenerateFromPassword([]byte("timing-equalizer"), bcrypt.DefaultCost)
+	})
+	_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 }
 
 func NewService(repo *Repository, userRepo *user.Repository, otpSender sms.OTPSender, jwtManager *jwt.Manager, cfg config.AuthConfig) *Service {
@@ -232,24 +257,41 @@ func (s *Service) findOrCreateUser(ctx context.Context, phone string) (*user.Use
 // deliberately generic (invalid_credentials) for both "no such username"
 // and "wrong password", so a client can't distinguish a nonexistent
 // username from a wrong password (avoids username enumeration).
+//
+// After cfg-configured repeated failures a username is locked for a while
+// (429 login_locked), whether or not it exists, so the lockout does not
+// reveal valid usernames either. The downside is that someone who knows a
+// username can lock that account out for the lockout period; the lock expires
+// by itself, and a locked account's password is not guessable meanwhile.
 func (s *Service) LoginWithPassword(ctx context.Context, username, password string) (*TokenPair, error) {
 	invalidCredentials := apperror.Unauthorized("invalid_credentials", "invalid username or password")
+
+	lockKey := strings.ToLower(username)
+	if locked, _ := s.loginLockout.Locked(lockKey); locked {
+		return nil, apperror.TooManyRequests("login_locked", "too many failed attempts, try again later")
+	}
 
 	u, err := s.userRepo.FindByUsername(ctx, username)
 	if err != nil {
 		var appErr *apperror.Error
 		if errors.As(err, &appErr) && appErr.Code == "user_not_found" {
+			burnPasswordCompare(password)
+			s.loginLockout.Fail(lockKey)
 			return nil, invalidCredentials
 		}
 		return nil, err
 	}
 
 	if u.PasswordHash == nil {
+		burnPasswordCompare(password)
+		s.loginLockout.Fail(lockKey)
 		return nil, invalidCredentials
 	}
 	if bcrypt.CompareHashAndPassword([]byte(*u.PasswordHash), []byte(password)) != nil {
+		s.loginLockout.Fail(lockKey)
 		return nil, invalidCredentials
 	}
+	s.loginLockout.Reset(lockKey)
 
 	if u.Role != user.RoleStaff && u.Role != user.RoleAdmin && u.Role != user.RoleWorker {
 		return nil, apperror.Forbidden("forbidden", "username/password login is only available to staff, worker, and admin accounts")

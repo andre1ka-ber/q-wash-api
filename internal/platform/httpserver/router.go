@@ -28,11 +28,18 @@ import (
 // the panic while chi.Recoverer, the outer middleware, still sends the 500
 // response) — empty means Sentry is disabled and the middleware is a
 // passthrough.
-func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string) (*chi.Mux, chi.Router) {
+//
+// trustProxyHeaders installs proxyClientIP, which rewrites RemoteAddr from
+// the forwarded headers of the one reverse proxy in front of the API (see
+// clientip.go). Off, RemoteAddr stays the TCP peer, so a client cannot choose
+// its own IP and dodge the per-IP rate limits.
+func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string, trustProxyHeaders bool) (*chi.Mux, chi.Router) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	if trustProxyHeaders {
+		r.Use(proxyClientIP)
+	}
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(monitoring.Middleware(sentryDSN))

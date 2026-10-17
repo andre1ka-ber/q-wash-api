@@ -148,6 +148,18 @@ secrets/TTLs, OTP TTL/cooldown/max-attempts, and local photo-upload storage
 (and ignored by git); real environment variables always take precedence
 over it.
 
+Two settings matter for a production deploy behind a reverse proxy:
+- `TRUST_PROXY_HEADERS` (default `true` outside production, `false` in
+  production): set it to `true` when a single reverse proxy that sets
+  `X-Forwarded-For` fronts the API, otherwise the per-IP rate limits see only
+  the proxy's address. Never enable it when the API is directly exposed. See
+  the platform's `docs/edge-cases.md`.
+- `RATE_LIMIT_LOGIN_PER_MINUTE`, `RATE_LIMIT_LOGIN_MAX_FAILURES`,
+  `RATE_LIMIT_LOGIN_LOCKOUT`, `RATE_LIMIT_OTP_REQUEST_PER_HOUR`,
+  `RATE_LIMIT_OTP_VERIFY_PER_HOUR`, `RATE_LIMIT_QR_SCAN_PER_MINUTE`: abuse
+  limits on the unauthenticated endpoints (defaults 10, 5, 15m, 5, 20, 60;
+  `0` turns one off). See `docs/API.md`, "Abuse limits".
+
 ## Known limitations
 
 - Only OTP codes go out through a real SMS provider (Payom.tj, opt-in via

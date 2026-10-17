@@ -30,11 +30,15 @@ func NewHandler(repo *Repository, manager *Manager, wpRepo *washingpoint.Reposit
 // /qr-codes/{id} routes under a single chi.Route call — avoids any
 // ambiguity about route-merge order across multiple Route calls for the
 // same prefix.
-func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin []func(http.Handler) http.Handler, requireStaff []func(http.Handler) http.Handler) {
+//
+// scanLimit rate-limits the public scan endpoint (every hit writes a scan
+// row); pass the same middleware to RegisterShortLinkRoutes so both paths
+// share one per-IP budget.
+func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin []func(http.Handler) http.Handler, requireStaff []func(http.Handler) http.Handler, scanLimit func(http.Handler) http.Handler) {
 	r.Route("/qr-codes", func(qr chi.Router) {
 		qr.With(requireStaff...).Get("/mine", h.getMine)
 		qr.With(requireStaff...).Post("/mine/request-replacement", h.requestReplacement)
-		qr.Get("/scan/{token}", h.scan)
+		qr.With(scanLimit).Get("/scan/{token}", h.scan)
 
 		qr.With(requireAdmin...).Post("/generate", h.generate)
 		qr.With(requireAdmin...).Get("/", h.list)
@@ -53,8 +57,8 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin []func(http.Handler)
 // still works too (kept for anything already relying on it), same
 // handler either way. Mount this on the root router returned by
 // httpserver.NewRouter, not the /api/v1 sub-router.
-func (h *Handler) RegisterShortLinkRoutes(r chi.Router) {
-	r.Get("/q/{token}", h.scan)
+func (h *Handler) RegisterShortLinkRoutes(r chi.Router, scanLimit func(http.Handler) http.Handler) {
+	r.With(scanLimit).Get("/q/{token}", h.scan)
 }
 
 type statsResponse struct {

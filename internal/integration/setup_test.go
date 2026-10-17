@@ -156,7 +156,9 @@ type testEnv struct {
 	cfg     config.Config
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+// newTestEnv boots an API on a fresh Postgres. opts tweak the config before
+// the server starts (e.g. to enable an optional feature).
+func newTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 	t.Helper()
 	ctx := context.Background()
 
@@ -211,6 +213,10 @@ func newTestEnv(t *testing.T) *testEnv {
 			OTPCooldown:        60 * time.Second,
 			OTPMaxAttempts:     5,
 		},
+	}
+
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	cfg.Storage = config.StorageConfig{Dir: t.TempDir(), BaseURL: "/uploads"}

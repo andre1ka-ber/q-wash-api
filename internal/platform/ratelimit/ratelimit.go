@@ -1,8 +1,9 @@
-// Package ratelimit is a small in-memory fixed-window limiter keyed by
-// client IP, for the few unauthenticated write endpoints (currently the
-// public connection-request form). State is per process: with several API
-// replicas each enforces its own window, which is acceptable for abuse
-// control but not for strict quotas.
+// Package ratelimit holds small in-memory abuse controls for the
+// unauthenticated endpoints: a fixed-window limiter keyed by client IP
+// (Limiter) and a failure-count lockout keyed by an arbitrary string such as
+// a username (Lockout). State is per process: with several API replicas each
+// enforces its own counters, which is acceptable for abuse control but not
+// for strict quotas.
 package ratelimit
 
 import (
@@ -65,10 +66,9 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 }
 
 // Middleware rejects over-limit requests with 429 too_many_requests and a
-// Retry-After header. The key is the request's remote IP; chi's RealIP
-// middleware (installed in httpserver.NewRouter) has already rewritten
-// RemoteAddr from X-Forwarded-For / X-Real-IP, so this is only trustworthy
-// behind a proxy that sets those headers itself.
+// Retry-After header. The key is the request's remote IP. When
+// TRUST_PROXY_HEADERS is on, httpserver.NewRouter has already rewritten
+// RemoteAddr from the proxy's forwarded headers; when off it is the TCP peer.
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ok, retry := l.Allow(clientIP(r))

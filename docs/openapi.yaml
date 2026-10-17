@@ -140,6 +140,11 @@ paths:
         can't enumerate valid usernames. 403 `forbidden` if the credentials
         are correct but the account isn't `staff`/`admin`. There is no
         endpoint to set a username/password — see `docs/DATA_MODEL.md`.
+        Abuse limits: 429 `too_many_requests` (with `Retry-After`) once an
+        IP exceeds the per-IP rate, and 429 `login_locked` after repeated
+        wrong passwords for the same username (case-insensitive, known or
+        not) until the lockout expires, even if the right password is then
+        sent. See "Abuse limits" in `docs/API.md`.
       requestBody:
         required: true
         content:
@@ -159,6 +164,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/auth/refresh:
     post:
@@ -1957,13 +1963,16 @@ paths:
       description: >
         Public, no auth. Always 200 with an HTML page — an unknown or
         disabled token still gets a generic page, never a 404/500, to
-        avoid leaking pool state to whoever is scanning.
+        avoid leaking pool state to whoever is scanning. Rate limited per
+        client IP (shared with the `/q/{token}` alias): 429
+        `too_many_requests` with `Retry-After` beyond the limit.
       responses:
         "200":
           description: OK
           content:
             text/html:
               schema: { type: string }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /q/{token}:
     parameters:
@@ -1986,6 +1995,7 @@ paths:
           content:
             text/html:
               schema: { type: string }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/admin/washing-points:
     get:

@@ -22,13 +22,29 @@ func NewHandler(service *Service, jwtManager *jwt.Manager) *Handler {
 	return &Handler{service: service, jwtManager: jwtManager}
 }
 
+// PublicLimits are the per-IP rate limiters for the unauthenticated auth
+// endpoints that can be abused (credential guessing, SMS cost). A nil field
+// means no limit; refresh needs none, its token is a 256-bit secret.
+type PublicLimits struct {
+	Login      func(http.Handler) http.Handler
+	OTPRequest func(http.Handler) http.Handler
+	OTPVerify  func(http.Handler) http.Handler
+}
+
+func orPassthrough(m func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	if m == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return m
+}
+
 // RegisterPublicRoutes mounts the unauthenticated auth endpoints
 // (OTP request/verify, refresh) under r.
-func (h *Handler) RegisterPublicRoutes(r chi.Router) {
+func (h *Handler) RegisterPublicRoutes(r chi.Router, limits PublicLimits) {
 	r.Route("/auth", func(auth chi.Router) {
-		auth.Post("/otp/request", h.requestOTP)
-		auth.Post("/otp/verify", h.verifyOTP)
-		auth.Post("/login", h.login)
+		auth.With(orPassthrough(limits.OTPRequest)).Post("/otp/request", h.requestOTP)
+		auth.With(orPassthrough(limits.OTPVerify)).Post("/otp/verify", h.verifyOTP)
+		auth.With(orPassthrough(limits.Login)).Post("/login", h.login)
 		auth.Post("/refresh", h.refresh)
 	})
 }

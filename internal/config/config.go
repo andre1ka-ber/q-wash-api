@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -18,10 +19,34 @@ type Config struct {
 	Push       PushConfig
 	SMS        SMSConfig
 	Monitoring MonitoringConfig
+	RateLimit  RateLimitConfig
+}
+
+// RateLimitConfig sets the abuse limits on the unauthenticated endpoints.
+// Per-IP limits key on the client IP, which is only meaningful when
+// HTTPConfig.TrustProxyHeaders matches the deployment (see its comment). A
+// value of 0 turns that limit off; the zero RateLimitConfig (used by tests)
+// therefore limits nothing, while Load always fills in the defaults below.
+type RateLimitConfig struct {
+	LoginPerMinute    int           // POST /auth/login, per IP (default 10)
+	LoginMaxFailures  int           // wrong passwords per username before lockout (default 5)
+	LoginLockout      time.Duration // how long a username stays locked (default 15m)
+	OTPRequestPerHour int           // POST /auth/otp/request, per IP (default 5)
+	OTPVerifyPerHour  int           // POST /auth/otp/verify, per IP (default 20)
+	QRScanPerMinute   int           // GET /q/{token} and /qr-codes/scan/{token}, per IP (default 60)
 }
 
 type HTTPConfig struct {
 	Port string
+	// TrustProxyHeaders makes the API take the client IP from the
+	// X-Forwarded-For / X-Real-IP headers. Turn it on only when the API sits
+	// behind a reverse proxy that overwrites those headers; otherwise any
+	// client can spoof its IP and dodge the per-IP rate limits. Off, the IP is
+	// the TCP peer — behind a proxy that is the proxy's address, so all users
+	// would then share one rate-limit bucket. Defaults to on outside
+	// production and off in production, so a production deploy behind a proxy
+	// must set TRUST_PROXY_HEADERS=true explicitly.
+	TrustProxyHeaders bool
 	// CORSAllowedOrigins lets a separately-hosted frontend (different
 	// origin/port) call this API from a browser. Comma-separated in env;
 	// "*" (the default) is fine for local dev but should be locked down to
@@ -115,6 +140,9 @@ func (c Config) IsProduction() bool { return c.Env == "production" }
 // startup error (a deploy may legitimately serve a public API) but is
 // reported by Warnings.
 func (c Config) Validate() error {
+	if err := c.RateLimit.validate(); err != nil {
+		return err
+	}
 	if !c.IsProduction() {
 		return nil
 	}
@@ -135,10 +163,22 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// validate rejects negative limits; 0 means "off" and is allowed.
+func (r RateLimitConfig) validate() error {
+	if r.LoginPerMinute < 0 || r.LoginMaxFailures < 0 || r.LoginLockout < 0 ||
+		r.OTPRequestPerHour < 0 || r.OTPVerifyPerHour < 0 || r.QRScanPerMinute < 0 {
+		return errors.New("RATE_LIMIT_* values must not be negative (0 turns a limit off)")
+	}
+	return nil
+}
+
 // Warnings lists non-fatal configuration smells worth logging at startup.
 func (c Config) Warnings() []string {
 	var warnings []string
 	if c.IsProduction() {
+		if !c.HTTP.TrustProxyHeaders {
+			warnings = append(warnings, "TRUST_PROXY_HEADERS is off in production: client IPs are the TCP peer's, so behind a reverse proxy every user shares one rate-limit bucket; set TRUST_PROXY_HEADERS=true if (and only if) your proxy overwrites X-Forwarded-For")
+		}
 		for _, origin := range c.HTTP.CORSAllowedOrigins {
 			if origin == "*" {
 				warnings = append(warnings, "CORS_ALLOWED_ORIGINS is \"*\" in production; lock it down to the real frontend origins")
@@ -206,6 +246,28 @@ func Load() (Config, error) {
 	if cfg.Auth.OTPMaxAttempts, err = getInt("OTP_MAX_ATTEMPTS", 5); err != nil {
 		return Config{}, err
 	}
+	if cfg.HTTP.TrustProxyHeaders, err = getBool("TRUST_PROXY_HEADERS", !cfg.IsProduction()); err != nil {
+		return Config{}, err
+	}
+	rl := &cfg.RateLimit
+	for _, f := range []struct {
+		dst      *int
+		env      string
+		fallback int
+	}{
+		{&rl.LoginPerMinute, "RATE_LIMIT_LOGIN_PER_MINUTE", 10},
+		{&rl.LoginMaxFailures, "RATE_LIMIT_LOGIN_MAX_FAILURES", 5},
+		{&rl.OTPRequestPerHour, "RATE_LIMIT_OTP_REQUEST_PER_HOUR", 5},
+		{&rl.OTPVerifyPerHour, "RATE_LIMIT_OTP_VERIFY_PER_HOUR", 20},
+		{&rl.QRScanPerMinute, "RATE_LIMIT_QR_SCAN_PER_MINUTE", 60},
+	} {
+		if *f.dst, err = getInt(f.env, f.fallback); err != nil {
+			return Config{}, err
+		}
+	}
+	if rl.LoginLockout, err = getDuration("RATE_LIMIT_LOGIN_LOCKOUT", 15*time.Minute); err != nil {
+		return Config{}, err
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -230,6 +292,18 @@ func getDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid duration for %s: %w", key, err)
 	}
 	return d, nil
+}
+
+func getBool(key string, fallback bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean for %s: %w", key, err)
+	}
+	return b, nil
 }
 
 func getCSV(key string, fallback []string) []string {

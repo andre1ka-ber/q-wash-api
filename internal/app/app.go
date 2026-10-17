@@ -53,7 +53,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	if cfg.IsProduction() {
 		sentryDSN = cfg.Monitoring.DSN
 	}
-	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN)
+	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN, cfg.HTTP.TrustProxyHeaders)
 	httpserver.MountStatic(router, cfg.Storage.BaseURL, cfg.Storage.Dir)
 
 	jwtManager := jwt.NewManager(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenTTL)
@@ -63,6 +63,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 
 	authRepo := auth.NewRepository(database)
 	authService := auth.NewService(authRepo, userRepo, otpSender, jwtManager, cfg.Auth)
+	authService.SetLoginLockout(ratelimit.NewLockout(cfg.RateLimit.LoginMaxFailures, cfg.RateLimit.LoginLockout))
 	authHandler := auth.NewHandler(authService, jwtManager)
 
 	wpRepo := washingpoint.NewRepository(database)
@@ -138,7 +139,12 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 		auth.RequireRole(string(user.RoleAdmin)),
 	}
 
-	authHandler.RegisterPublicRoutes(v1)
+	rl := cfg.RateLimit
+	authHandler.RegisterPublicRoutes(v1, auth.PublicLimits{
+		Login:      ratelimit.PerIP(rl.LoginPerMinute, time.Minute),
+		OTPRequest: ratelimit.PerIP(rl.OTPRequestPerHour, time.Hour),
+		OTPVerify:  ratelimit.PerIP(rl.OTPVerifyPerHour, time.Hour),
+	})
 	wpHandler.RegisterRoutes(v1, requireStaff...)
 	serviceHandler.RegisterRoutes(v1, requireStaff...)
 	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps)
@@ -150,8 +156,10 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	photoHandler.RegisterRoutes(v1, requireStaff...)
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)
 	boxHandler.RegisterRoutes(v1, requireStaff...)
-	qrCodeHandler.RegisterRoutes(v1, requireAdmin, requireStaff)
-	qrCodeHandler.RegisterShortLinkRoutes(router)
+	// One limiter for both scan paths so they share a per-IP budget.
+	scanLimit := ratelimit.PerIP(rl.QRScanPerMinute, time.Minute)
+	qrCodeHandler.RegisterRoutes(v1, requireAdmin, requireStaff, scanLimit)
+	qrCodeHandler.RegisterShortLinkRoutes(router, scanLimit)
 
 	v1.Group(func(protected chi.Router) {
 		protected.Use(requireAuth)

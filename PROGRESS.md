@@ -28,7 +28,7 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
 - [x] `docs/PLAN_WEB_APPS.md` phase 7 — Worker role (`requireQueueOps`, pause/resume, broadened cancel, live-boxes, queue date filter)
 - [x] `docs/PLAN_WEB_APPS.md` phase 8 — Display board (`GET /washing-points/{id}/board`, staff/admin only, no SSE variant)
 - [ ] `docs/PLAN_WEB_APPS.md` phase 9 (docs+tests batch — partially covered incrementally per-phase already, see log)
-- [ ] OWASP 2025 security hardening — `plan-security-hardening.md` / `progress-security-hardening.md`; phase 1 done (staff can no longer PATCH `status`/`owner_id`; JSON bodies capped at 1 MiB), phases 2-6 pending
+- [ ] OWASP 2025 security hardening — `plan-security-hardening.md` / `progress-security-hardening.md`; phases 1-2 done (staff can no longer PATCH `status`/`owner_id`; JSON bodies capped at 1 MiB; rate limits + login lockout + `TRUST_PROXY_HEADERS`), phases 3-6 pending
 
 ## Log
 
