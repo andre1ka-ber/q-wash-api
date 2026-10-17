@@ -71,6 +71,34 @@ func (r *Repository) FindActiveRefreshTokenByHash(ctx context.Context, hash stri
 	return &t, nil
 }
 
+// FindRefreshTokenByHash returns the token with that hash in any state
+// (active, expired or revoked), or nil. Only for diagnosing reuse of a
+// revoked token; authentication must use FindActiveRefreshTokenByHash.
+func (r *Repository) FindRefreshTokenByHash(ctx context.Context, hash string) (*RefreshToken, error) {
+	var t RefreshToken
+	err := r.db.WithContext(ctx).Where("token_hash = ?", hash).First(&t).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return &t, nil
+}
+
+// RevokeRefreshTokenIfActive revokes the token and reports whether this call
+// was the one that did it. The check and the write are one UPDATE, so of two
+// concurrent rotations of the same token exactly one gets true.
+func (r *Repository) RevokeRefreshTokenIfActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	res := r.db.WithContext(ctx).Model(&RefreshToken{}).
+		Where("id = ? AND revoked_at IS NULL", id).
+		Update("revoked_at", time.Now())
+	if res.Error != nil {
+		return false, apperror.Internal(res.Error)
+	}
+	return res.RowsAffected == 1, nil
+}
+
 func (r *Repository) RevokeRefreshToken(ctx context.Context, id uuid.UUID) error {
 	err := r.db.WithContext(ctx).Model(&RefreshToken{}).
 		Where("id = ? AND revoked_at IS NULL", id).

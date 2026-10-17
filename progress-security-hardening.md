@@ -1,6 +1,6 @@
 # Progress: security hardening (plan-security-hardening.md)
 
-Plan approved 2026-10-17. Phase 1 and 2 done; phases 3-6 not started.
+Plan approved 2026-10-17. Phases 1-3 done; phases 4-6 not started.
 
 ## Phase 1: access control and request limits (#2, #5): done 2026-10-17
 
@@ -54,3 +54,30 @@ Decisions (user, 2026-10-17): `TRUST_PROXY_HEADERS` flag; default rate-limit num
 - Deploy note: a production deploy behind a reverse proxy must set `TRUST_PROXY_HEADERS=true`, else all
   users share one rate-limit bucket. Customers behind one carrier NAT share a per-IP budget; raise
   `RATE_LIMIT_OTP_REQUEST_PER_HOUR` if real users hit it.
+
+## Phase 3: sessions and tokens (#4, #11, #12): done 2026-10-17
+
+Decision (user, 2026-10-17) for #4: short TTL for staff roles, no `token_version` column (no schema change).
+
+- #4: `jwt.Manager.WithPrivilegedTTL`; staff/worker/admin access tokens live `JWT_STAFF_ACCESS_TTL`
+  (default 5m), customers keep `JWT_ACCESS_TTL` (15m). Worst case a demoted or removed staff member keeps
+  access 5 minutes. Not changed: password change still does not invalidate access tokens already issued
+  (they expire within the TTL); revoking refresh tokens already happens there.
+  Client check: `q-wash-shared`'s `apiRequest` refreshes on 401 and retries once, and the display board's
+  polling fallback keeps tokens fresh for the SSE reconnect, so no web-app change was made. The SSE client
+  itself does not refresh on 401 (unchanged).
+- #11: refresh rotation is one atomic `UPDATE ... WHERE revoked_at IS NULL` (`RevokeRefreshTokenIfActive`);
+  of N concurrent rotations of one token exactly one succeeds. Deviation from the plan: reuse of a revoked
+  token is **logged** (`auth.refresh_reuse`) but does **not** revoke the user's other sessions. `revoked_at`
+  cannot tell a rotated token from one revoked by logout or password change (no column for it; adding one
+  is a schema change), so family-revoking would let one stale device, or a device left over after a
+  password change, log out the user's current session. Revisit with a `rotated_at`/`replaced_by` column if
+  wanted.
+- #12: new `internal/platform/audit` (event + client IP + request id; phones masked, usernames truncated).
+  Events: login ok/failed, OTP requested/failed/verified/failed, refresh failed/reuse, password changed/
+  failed, credential reset (actor, target, point). No secrets are logged (tested).
+- Tests: `jwt/jwt_test.go`, `audit/audit_test.go`, `config_test.go` (TTL), integration
+  `token_security_test.go` (staff vs customer lifetime, 8 concurrent refreshes → exactly one 200, audit
+  events present and free of passwords/tokens).
+- Docs: `docs/API.md` ("Session lifetime and audit log"), `README.md`.
+- Not done: `.env.example` (cannot be edited from this session): add `JWT_STAFF_ACCESS_TTL=5m`.

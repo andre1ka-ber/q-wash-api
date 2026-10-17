@@ -144,6 +144,23 @@ func TestLoadProxyTrustAndRateLimits(t *testing.T) {
 	})
 }
 
+func TestLoadStaffAccessTokenTTL(t *testing.T) {
+	cfg, err := Load()
+	if err != nil || cfg.Auth.StaffAccessTokenTTL != 5*time.Minute || cfg.Auth.AccessTokenTTL != 15*time.Minute {
+		t.Fatalf("defaults: staff=%v access=%v err=%v", cfg.Auth.StaffAccessTokenTTL, cfg.Auth.AccessTokenTTL, err)
+	}
+
+	t.Setenv("JWT_STAFF_ACCESS_TTL", "2m")
+	if cfg, err = Load(); err != nil || cfg.Auth.StaffAccessTokenTTL != 2*time.Minute {
+		t.Fatalf("override: staff=%v err=%v", cfg.Auth.StaffAccessTokenTTL, err)
+	}
+
+	t.Setenv("JWT_STAFF_ACCESS_TTL", "soon")
+	if _, err = Load(); err == nil {
+		t.Fatal("an unparsable duration must fail startup")
+	}
+}
+
 func TestLoadMonitoring(t *testing.T) {
 	t.Run("empty SENTRY_DSN by default", func(t *testing.T) {
 		cfg, err := Load()

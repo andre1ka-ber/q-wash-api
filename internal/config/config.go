@@ -74,6 +74,11 @@ type AuthConfig struct {
 	// AccessTokenSecret signs short-lived JWT access tokens.
 	AccessTokenSecret string
 	AccessTokenTTL    time.Duration
+	// StaffAccessTokenTTL is the shorter access-token life for staff, worker
+	// and admin accounts (default 5m). Tokens carry the role and washing
+	// point without a DB check, so this bounds how long a demoted or removed
+	// account keeps its access. 0 means "same as AccessTokenTTL".
+	StaffAccessTokenTTL time.Duration
 
 	// RefreshTokenPepper is an HMAC key used to hash opaque refresh tokens
 	// before storing/looking them up, so a leaked DB alone isn't enough to
@@ -232,6 +237,9 @@ func Load() (Config, error) {
 		}
 	}
 	if cfg.Auth.AccessTokenTTL, err = getDuration("JWT_ACCESS_TTL", 15*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.StaffAccessTokenTTL, err = getDuration("JWT_STAFF_ACCESS_TTL", 5*time.Minute); err != nil {
 		return Config{}, err
 	}
 	if cfg.Auth.RefreshTokenTTL, err = getDuration("JWT_REFRESH_TTL", 30*24*time.Hour); err != nil {

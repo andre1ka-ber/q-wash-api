@@ -148,6 +148,9 @@ secrets/TTLs, OTP TTL/cooldown/max-attempts, and local photo-upload storage
 (and ignored by git); real environment variables always take precedence
 over it.
 
+`JWT_STAFF_ACCESS_TTL` (default `5m`) is the shorter access-token life for
+staff/worker/admin accounts; `JWT_ACCESS_TTL` (15m) applies to customers.
+
 Two settings matter for a production deploy behind a reverse proxy:
 - `TRUST_PROXY_HEADERS` (default `true` outside production, `false` in
   production): set it to `true` when a single reverse proxy that sets

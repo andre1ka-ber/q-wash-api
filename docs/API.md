@@ -29,7 +29,7 @@ Token pair response shape (returned by verify/login/refresh):
 `washing_point_id` is set only for `staff`/`worker` accounts (which point they're scoped to); omitted (`null`) for `customer`/`admin`. Added so staff-facing apps (e.g. `q-wash-cabinet`) can discover their own point without a point-picker UI. `phone_number` is omitted for `staff`/`worker`/`admin` accounts — only customers have one (see `docs/DATA_MODEL.md`'s `User` entry).
 
 There is no API endpoint to set an arbitrary username for a user — same as role promotion, that's a direct-DB operation by design (see `docs/DATA_MODEL.md`). Every washing point's staff/worker accounts are auto-provisioned on creation instead (see "Washing point credentials" below); their password can be changed by the account itself via `PATCH /auth/password` above (knows the current password) or reset to a new random one via the credential-reset endpoint (their own point's staff, or admin — doesn't need to know the old password, e.g. for a forgotten one). `cmd/seed` separately sets dev-only credentials for the seeded admin account.
-Access tokens are JWTs (HS256, 15m default TTL) carrying `uid`/`role` claims, verified statelessly (no DB hit) by `auth.RequireAuth` middleware. Refresh tokens are opaque random strings, stored HMAC-hashed, never JWTs — so individual sessions can be revoked. Role-gated routes (Phase 4+) use `auth.RequireRole("staff", "admin")` chained after `RequireAuth`.
+Access tokens are JWTs (HS256, 15m default TTL for customers, 5m for `staff`/`worker`/`admin` — see "Session lifetime" below) carrying `uid`/`role` claims, verified statelessly (no DB hit) by `auth.RequireAuth` middleware. Refresh tokens are opaque random strings, stored HMAC-hashed, never JWTs — so individual sessions can be revoked. Role-gated routes (Phase 4+) use `auth.RequireRole("staff", "admin")` chained after `RequireAuth`.
 
 ### Abuse limits — implemented (`plan-security-hardening.md` phase 2)
 
@@ -49,6 +49,12 @@ Notes:
 - Customers on one mobile carrier's shared (NAT) address share a per-IP budget. If real users get `too_many_requests` on OTP, raise `RATE_LIMIT_OTP_REQUEST_PER_HOUR` rather than turning it off.
 - **Client IP:** with `TRUST_PROXY_HEADERS=true` the IP is the **rightmost** entry of `X-Forwarded-For` (the one the single trusted reverse proxy appended), falling back to `X-Real-IP`; otherwise it is the TCP peer. Default: on outside production, **off in production** — so a production deploy behind a reverse proxy must set `TRUST_PROXY_HEADERS=true`, or all users share the proxy's bucket (the API logs a startup warning). Only one proxy hop is supported. See `docs/edge-cases.md` in the platform repo.
 - Login also performs a dummy password hash comparison for an unknown username (or one with no password), so response time does not reveal which usernames exist.
+
+### Session lifetime and audit log — implemented (`plan-security-hardening.md` phase 3)
+
+- **Access-token life:** `JWT_ACCESS_TTL` (default 15m) for customers, `JWT_STAFF_ACCESS_TTL` (default 5m) for `staff`/`worker`/`admin`. A token's role and washing point are trusted until it expires (no DB check per request), so a demoted or removed staff member keeps access for at most that long. Clients refresh on 401 as before; the response's `access_token_expires_at` is authoritative.
+- **Refresh rotation is atomic:** if the same refresh token is presented twice at once, exactly one request gets a new pair and the other gets 401 `invalid_refresh_token`. Presenting an already-revoked token is also 401 and is logged as `auth.refresh_reuse`; it does **not** revoke the user's other sessions (a revoked token may be stale from a logout, rotation or password change, so it is not proof of theft).
+- **Audit events** are `slog` records with message `audit` and an `event` attribute, plus client `ip` and `request_id`: `auth.login`, `auth.login_failed` (with submitted `username` and error `code`, e.g. `login_locked`), `auth.otp_requested`, `auth.otp_request_failed`, `auth.otp_login`, `auth.otp_verify_failed` (phone masked to the last 4 digits), `auth.refresh_failed`, `auth.refresh_reuse`, `auth.password_changed`, `auth.password_change_failed`, `credentials.reset` (actor, target user, washing point). Failures log at WARN. Passwords, OTP codes and tokens are never logged.
 
 ## Users — implemented (Phase 3)
 

@@ -9,6 +9,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/audit"
 	"q-wash-api/internal/platform/jwt"
 	"q-wash-api/internal/user"
 )
@@ -74,9 +75,11 @@ func (h *Handler) requestOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.RequestOTP(r.Context(), req.PhoneNumber); err != nil {
+		audit.Warn(r, "auth.otp_request_failed", "phone", audit.MaskPhone(req.PhoneNumber), "code", audit.ErrorCode(err))
 		httputil.WriteError(w, r, err)
 		return
 	}
+	audit.Info(r, "auth.otp_requested", "phone", audit.MaskPhone(req.PhoneNumber))
 	httputil.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "otp_sent"})
 }
 
@@ -94,9 +97,11 @@ func (h *Handler) verifyOTP(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := h.service.VerifyOTP(r.Context(), req.PhoneNumber, req.Code)
 	if err != nil {
+		audit.Warn(r, "auth.otp_verify_failed", "phone", audit.MaskPhone(req.PhoneNumber), "code", audit.ErrorCode(err))
 		httputil.WriteError(w, r, err)
 		return
 	}
+	audit.Info(r, "auth.otp_login", "user_id", pair.User.ID.String())
 	httputil.WriteJSON(w, http.StatusOK, toTokenPairResponse(pair))
 }
 
@@ -123,9 +128,11 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := h.service.LoginWithPassword(r.Context(), username, req.Password)
 	if err != nil {
+		audit.Warn(r, "auth.login_failed", "username", audit.Truncate(username, 64), "code", audit.ErrorCode(err))
 		httputil.WriteError(w, r, err)
 		return
 	}
+	audit.Info(r, "auth.login", "user_id", pair.User.ID.String(), "role", string(pair.User.Role))
 	httputil.WriteJSON(w, http.StatusOK, toTokenPairResponse(pair))
 }
 
@@ -146,6 +153,7 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := h.service.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
+		audit.Warn(r, "auth.refresh_failed", "code", audit.ErrorCode(err))
 		httputil.WriteError(w, r, err)
 		return
 	}
@@ -179,9 +187,11 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := h.service.ChangePassword(r.Context(), authUser.ID, req.CurrentPassword, req.NewPassword)
 	if err != nil {
+		audit.Warn(r, "auth.password_change_failed", "user_id", authUser.ID.String(), "code", audit.ErrorCode(err))
 		httputil.WriteError(w, r, err)
 		return
 	}
+	audit.Info(r, "auth.password_changed", "user_id", authUser.ID.String())
 	httputil.WriteJSON(w, http.StatusOK, toTokenPairResponse(pair))
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"regexp"
 	"strings"
@@ -354,10 +355,18 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 		return nil, err
 	}
 	if existing == nil {
+		s.logRevokedRefreshReuse(ctx, hash)
 		return nil, apperror.Unauthorized("invalid_refresh_token", "refresh token is invalid or expired")
 	}
-	if err := s.repo.RevokeRefreshToken(ctx, existing.ID); err != nil {
+	// One atomic revoke: if a concurrent request already rotated this token,
+	// only one of the two proceeds and the other is told it is invalid.
+	revoked, err := s.repo.RevokeRefreshTokenIfActive(ctx, existing.ID)
+	if err != nil {
 		return nil, err
+	}
+	if !revoked {
+		slog.WarnContext(ctx, "audit", "event", "auth.refresh_reuse", "user_id", existing.UserID.String(), "reason", "concurrent_rotation")
+		return nil, apperror.Unauthorized("invalid_refresh_token", "refresh token is invalid or expired")
 	}
 
 	u, err := s.userRepo.FindByID(ctx, existing.UserID)
@@ -365,6 +374,21 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 		return nil, err
 	}
 	return s.issueTokenPair(ctx, u)
+}
+
+// logRevokedRefreshReuse records when a presented refresh token is known but
+// already revoked: either a stale client retry or a stolen token being replayed
+// after the real client rotated it. Only a log event, not a forced logout:
+// revoked_at does not say whether a token was rotated, logged out or revoked by
+// a password change, and revoking all of the user's sessions on every such
+// reuse would let one old device log out the others. Best effort — a lookup
+// error is ignored, the caller is already rejecting the request.
+func (s *Service) logRevokedRefreshReuse(ctx context.Context, hash string) {
+	old, err := s.repo.FindRefreshTokenByHash(ctx, hash)
+	if err != nil || old == nil || old.RevokedAt == nil {
+		return
+	}
+	slog.WarnContext(ctx, "audit", "event", "auth.refresh_reuse", "user_id", old.UserID.String(), "reason", "revoked_token_presented")
 }
 
 // Logout revokes the given refresh token, or every active refresh token for

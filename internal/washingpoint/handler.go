@@ -12,6 +12,7 @@ import (
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/auth"
 	"q-wash-api/internal/httputil"
+	"q-wash-api/internal/platform/audit"
 	"q-wash-api/internal/user"
 )
 
@@ -502,6 +503,7 @@ func (h *Handler) resetCredentials(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
+	audit.Info(r, "credentials.reset", "actor_id", authUser.ID.String(), "target_user_id", u.ID.String(), "washing_point_id", id.String(), "role", string(role))
 
 	httputil.WriteJSON(w, http.StatusOK, CredentialResponse{
 		Username: *u.Username,

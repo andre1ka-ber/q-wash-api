@@ -56,7 +56,8 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	router, v1 := httpserver.NewRouter(database, cfg.HTTP.CORSAllowedOrigins, sentryDSN, cfg.HTTP.TrustProxyHeaders)
 	httpserver.MountStatic(router, cfg.Storage.BaseURL, cfg.Storage.Dir)
 
-	jwtManager := jwt.NewManager(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenTTL)
+	jwtManager := jwt.NewManager(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenTTL).
+		WithPrivilegedTTL(cfg.Auth.StaffAccessTokenTTL)
 
 	userRepo := user.NewRepository(database)
 	userHandler := user.NewHandler(userRepo)
