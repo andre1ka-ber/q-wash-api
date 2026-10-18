@@ -1,6 +1,6 @@
 # Progress: security hardening (plan-security-hardening.md)
 
-Plan approved 2026-10-17. Phases 1-5 done; phase 6 not started.
+Plan approved 2026-10-17. Phases 1-6 done (phase 6 has manual follow-ups, see below).
 
 ## Phase 1: access control and request limits (#2, #5): done 2026-10-17
 
@@ -90,8 +90,7 @@ Decisions (user, 2026-10-17): #8 disable `/docs` in production; #10 refuse to st
   `Referrer-Policy: no-referrer` on every response, `Strict-Transport-Security: max-age=31536000` in
   production. `/uploads/*` additionally gets `Content-Security-Policy: default-src 'none'; sandbox`. No global
   CSP: the QR scan page is HTML with an inline style. `NewRouter` gained a `production` parameter.
-  Not done (phase 6, needs go-ahead): CSP/headers for the web apps and `q-wash-web`, which are served by
-  something outside this repo.
+  Web-app CSP/headers: see phase 6.
 - #8: `GET /docs` is not registered when `APP_ENV=production` (404); `GET /openapi.yaml` stays. Plan
   alternative (pin + SRI) was not chosen.
 - #10: production now refuses to start when `DB_PASSWORD` is the dev default `pegasus` (same check as the JWT
@@ -152,3 +151,27 @@ Residual risks, not changed (listed so they are not lost):
 - `PAYOM_BASE_URL` may be configured as `http://...`; the bearer token would then travel unencrypted. Not
   enforced because the Payom unit tests use plain-HTTP `httptest` servers; a production-only https check in
   config validation would close it.
+
+## Phase 6 (infra and other subprojects), 2026-10-18
+
+Go-ahead given by the user for `Dockerfile`, `deploy.yml` and `q-wash-web/config.js`.
+
+- #9 `Dockerfile`: `migrate` tarball downloaded with `curl -f` and verified against a pinned SHA-256 (build args
+  `MIGRATE_VERSION`/`MIGRATE_SHA256`; checksum taken from the upstream release's `sha256sum.txt`); `curl` removed
+  after use; `/app/seed` no longer built or shipped (`cmd/seed` creates `admin/admin12345`). The container now
+  runs as an unprivileged `app` user: the entrypoint starts as root only to `chown` the `uploads` volume (volumes
+  created by the old root image stay root-owned), then drops privileges with `su-exec` before `migrate` and the API.
+  Verified: image builds, `id` is `app`, `/app` has no `seed`, entrypoint reaches `migrate` as `app`.
+  Not verified: a full container run against a real Postgres and an existing root-owned uploads volume.
+- #9 `deploy.yml`: all five third-party actions pinned to commit SHAs (tag kept as a trailing comment).
+  Dependabot/Renovate would be needed to keep them current.
+- #14 `q-wash-web`: `config.js` default left as the local dev URL; the form now refuses to submit (and logs)
+  unless `API_BASE_URL` is `https://`, or http on localhost for a localhost page (`apiUrlAllowed`, tested).
+  Committed in the `q-wash-web` repo (`ba92432`).
+- #7 web part: recommended CSP/nosniff/referrer/HSTS headers documented in `q-wash-web/README.md`. The serving
+  config is outside these repos, so nothing could be applied. The four Vite apps are not covered: they need their
+  own header set (and a check for inline scripts/styles) once their host is known.
+- #15 Firebase key restrictions: manual console step, not done.
+
+Manual follow-ups for the user: set `API_BASE_URL` to the real HTTPS URL on deploy; apply the headers on the web
+host; restrict the Firebase API keys to the app package/bundle id; watch the first deploy (non-root + chown).
