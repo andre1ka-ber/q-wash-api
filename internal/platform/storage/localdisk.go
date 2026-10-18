@@ -39,13 +39,21 @@ func (s *LocalDisk) Put(_ context.Context, filename string, content io.Reader) (
 	// safe even if filename somehow contained separators.
 	name := id.String() + strings.ToLower(filepath.Ext(filename))
 
-	f, err := os.Create(filepath.Join(s.dir, name))
+	path := filepath.Join(s.dir, name)
+	f, err := os.Create(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 
+	// A failed or short write (client disconnected mid-upload, disk full)
+	// must not leave a truncated file behind that no DB row points to.
 	if _, err := io.Copy(f, content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", err
 	}
 	return s.baseURL + "/" + name, nil

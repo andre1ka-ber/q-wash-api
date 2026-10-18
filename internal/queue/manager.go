@@ -332,9 +332,10 @@ func (m *Manager) CancelBooking(ctx context.Context, id uuid.UUID) (*Queue, erro
 	}
 
 	now := time.Now()
+	from := q.Status
 	q.Status = StatusCanceled
 	q.CanceledAt = &now
-	if err := m.repo.UpdateStatus(ctx, q); err != nil {
+	if err := m.repo.UpdateStatus(ctx, q, from); err != nil {
 		return nil, err
 	}
 	m.bus.Publish(q.WashingPointID)
@@ -409,11 +410,12 @@ func (m *Manager) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus Stat
 		return nil, apperror.Conflict("invalid_status_transition", fmt.Sprintf("cannot transition from %q to %q", q.Status, newStatus))
 	}
 
+	from := q.Status
 	q.Status = newStatus
 	if newStatus == StatusQueue {
 		q.CanceledAt = nil
 	}
-	if err := m.repo.UpdateStatus(ctx, q); err != nil {
+	if err := m.repo.UpdateStatus(ctx, q, from); err != nil {
 		return nil, err
 	}
 	m.bus.Publish(q.WashingPointID)

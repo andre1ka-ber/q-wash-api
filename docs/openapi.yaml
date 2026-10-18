@@ -1352,8 +1352,11 @@ paths:
         `no_show` or `canceled` booking (409 `slot_unavailable` if its
         box/time was taken meanwhile, 409 `active_booking_exists` if the
         customer has another active booking). `ready` is terminal. 409
-        `invalid_status_transition` on any other move. Cancel stays the
-        separate `/cancel` action.
+        `invalid_status_transition` on any other move. 409
+        `status_changed` if the booking was changed by someone else between
+        the read and the write (reload and retry); also returned by
+        `/cancel`, `/pause` and `/resume`. Cancel stays the separate
+        `/cancel` action.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1510,8 +1513,9 @@ paths:
       operationId: createNotification
       summary: Send (or schedule) a notification
       description: >
-        Requires role `staff` or `admin`. If `queue_id` is given, staff may
-        only reference a booking at their own washing point — 404
+        Requires role `staff` or `admin`. Staff must give `queue_id` (400
+        `queue_id_required` otherwise; only admin may omit it) and may only
+        reference a booking at their own washing point — 404
         `queue_not_found` otherwise. If `send_at` is due (omitted, or
         now/past), sends immediately through the same `sms.Sender` used for
         OTP and persists the outcome (`status: sent`/`failed`). A future

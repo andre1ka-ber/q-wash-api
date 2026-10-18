@@ -56,6 +56,13 @@ type CreateInput struct {
 }
 
 func (m *Manager) Create(ctx context.Context, in CreateInput) (*Notification, error) {
+	// Without a booking there is nothing tying the recipient to the caller's
+	// washing point, so a staff member could send free text to any user id.
+	// Only admin (network-wide) may omit queue_id.
+	if in.QueueID == nil && in.Caller.Role != "admin" {
+		return nil, apperror.BadRequest("queue_id_required", "queue_id is required: staff can only notify the customer of a booking at their washing point")
+	}
+
 	target, err := m.userRepo.FindByID(ctx, in.UserID)
 	if err != nil {
 		return nil, err

@@ -2,11 +2,41 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type failingReader struct{ n int }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, errors.New("connection reset")
+	}
+	r.n--
+	return copy(p, "partial"), nil
+}
+
+func TestLocalDisk_FailedPutLeavesNoFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewLocalDisk(dir, "/uploads")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Put(context.Background(), "photo.jpg", &failingReader{n: 2}); err == nil {
+		t.Fatal("expected the read error to be returned")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failed upload left %d file(s) behind: %v", len(entries), entries)
+	}
+}
 
 func TestLocalDisk_PutAndDelete(t *testing.T) {
 	dir := t.TempDir()

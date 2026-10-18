@@ -27,11 +27,19 @@ func NewManager(repo *Repository, fileStorage storage.Storage) *Manager {
 // directly. The first photo for a washing point is auto-promoted to cover
 // regardless of isCover; a later isCover:true unsets any existing cover
 // first, keeping exactly one true.
-func (m *Manager) Upload(ctx context.Context, washingPointID uuid.UUID, ext string, content io.Reader, isCover bool) (*WashingPointPhoto, error) {
+func (m *Manager) Upload(ctx context.Context, washingPointID uuid.UUID, ext string, content io.Reader, isCover bool) (_ *WashingPointPhoto, err error) {
 	url, err := m.storage.Put(ctx, "photo"+ext, content)
 	if err != nil {
 		return nil, err
 	}
+	// The file is written before its DB row; if anything below fails, remove
+	// it again so a failed upload does not leave an unreferenced file on disk
+	// (best effort — a failed cleanup is not worth masking the real error).
+	defer func() {
+		if err != nil {
+			_ = m.storage.Delete(context.WithoutCancel(ctx), url)
+		}
+	}()
 
 	count, err := m.repo.CountByWashingPoint(ctx, washingPointID)
 	if err != nil {

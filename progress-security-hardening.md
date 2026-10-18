@@ -1,6 +1,6 @@
 # Progress: security hardening (plan-security-hardening.md)
 
-Plan approved 2026-10-17. Phases 1-4 done; phases 5-6 not started.
+Plan approved 2026-10-17. Phases 1-5 done; phase 6 not started.
 
 ## Phase 1: access control and request limits (#2, #5): done 2026-10-17
 
@@ -101,3 +101,54 @@ Decisions (user, 2026-10-17): #8 disable `/docs` in production; #10 refuse to st
 - Tests: `httpserver/headers_test.go` (headers on/off per environment, `/docs` dev vs production, upload CSP),
   `config_test.go` (DB password refusal, sslmode warning, Load paths now set `DB_PASSWORD`).
 - Docs: `docs/API.md` (conventions, `/docs` note), `README.md`, platform `docs/links.md` (`/docs` is dev-only).
+
+## Phase 5: remaining review and dependency scan: done 2026-10-17
+
+Reviewed: booking creation/cancel/status (`queue/manager.go`), notification manager and scheduler, SSE
+handlers, photo upload ordering, Payom/FCM clients (outbound), `govulncheck`.
+
+Fixed:
+- **Staff could send free-text notifications to any user id.** `POST /notifications` without `queue_id` skipped
+  the washing-point ownership check entirely. Now non-admin callers must give `queue_id` (400
+  `queue_id_required`); admin may omit it. No client in this repo calls the endpoint. API contract change.
+- **Lost-update race on booking status.** `UpdateStatus` wrote the new status with no check of the old one,
+  so a customer's cancel racing a worker's "start washing" could resurrect a canceled booking, and two
+  identical transitions both reported success. The write is now compare-and-set on the status that was read
+  (409 `status_changed`); `UpdatePausedAt` only applies while the booking is still `washing`. Applies to
+  `/status`, `/cancel`, `/pause`, `/resume`. API contract: new 409 code.
+- **Orphan files on failed uploads.** `photo.Manager.Upload` now removes the stored file if the DB step fails;
+  `LocalDisk.Put` removes a partial file when the copy fails.
+- **Dependency CVE:** `golang.org/x/text` v0.40.0 → v0.41.0 (GO-2026-6629, reachable). Indirect dependency,
+  version bump only (`go.mod`/`go.sum`, 3 lines).
+
+`govulncheck` (v1.1.4, run via `go run`) result after the bump: **19 vulnerabilities, all in the Go standard
+library of the local toolchain go1.26.5** (net/http, crypto/tls, html/template, net/url, encoding/xml/asn1,
+net/textproto), fixed in go1.26.6 through go1.26.9. Not fixable in this repo's code. The `Dockerfile` builds
+with `golang:1.26-alpine`, which resolves to the newest 1.26.x at build time, so a fresh image build should
+already contain the fixes (confirm by rebuilding and re-running `govulncheck` on the image's toolchain).
+**Action for you:** upgrade the local Go toolchain (`~/go-sdk`) to ≥ 1.26.9 and consider raising the `go`
+directive in `go.mod` from `go 1.26.5` to `go 1.26.9` so any build uses a fixed toolchain. Not done here: it
+changes the dev environment and the pinned stack in `docs/techstack.md`.
+
+Reviewed, no change needed:
+- Booking creation: re-checks availability inside a row lock on the washing point, DB EXCLUDE constraint as a
+  backstop, one-active-booking unique index; ownership of the car checked; notes capped at 2000 chars.
+- Stage notifications never fail the status change (background goroutine, 20 s timeout, errors logged);
+  `(booking, kind)` unique index prevents double sends across instances.
+- API7 (SSRF): no outbound request uses user-supplied URLs. Payom base URL comes from config; FCM endpoint is a
+  constant plus the configured project id; device tokens are only sent as JSON body values.
+- API10 (unsafe consumption): FCM/Payom responses are read through bounded readers and only status codes /
+  known JSON error fields are used; both clients have 10 s timeouts.
+
+Residual risks, not changed (listed so they are not lost):
+- **SSE:** `http.Server.WriteTimeout` is 30 s and also applies to streaming responses, so `/events` streams
+  are probably cut every 30 s and the clients reconnect (a fresh snapshot each time). Not verified; the fix is
+  `http.NewResponseController(w).SetWriteDeadline(time.Time{})` in the two SSE handlers. There is also no
+  per-user cap on open SSE connections (an authenticated user can hold many).
+- A stage notification row is created before sending; if the process dies between the two it stays `pending`
+  and is never retried.
+- FCM error bodies (≤ 4 KB) are included in the logged error text.
+- `NotifyStage` goroutines are unbounded in number (each status change spawns one).
+- `PAYOM_BASE_URL` may be configured as `http://...`; the bearer token would then travel unencrypted. Not
+  enforced because the Payom unit tests use plain-HTTP `httptest` servers; a production-only https check in
+  config validation would close it.

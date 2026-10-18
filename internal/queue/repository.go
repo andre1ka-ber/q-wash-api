@@ -217,11 +217,15 @@ func (r *Repository) FindScheduledInRangeNetworkWide(ctx context.Context, rangeS
 }
 
 // UpdateStatus writes status (plus canceled_at: set on cancel, cleared on
-// restore to queue) only — never the booking's other fields. Restoring a
-// canceled/no-show booking can collide with a newer booking in the same
-// box/time (EXCLUDE) or with the customer's other active booking (unique
-// index); both surface as the same friendly 409s as Create.
-func (r *Repository) UpdateStatus(ctx context.Context, q *Queue) error {
+// restore to queue) only — never the booking's other fields. The write only
+// applies if the booking is still in status from (what the caller read and
+// validated the transition against); otherwise another request changed it in
+// between and this returns 409 status_changed, so e.g. a customer's cancel
+// and a worker's "start washing" racing cannot resurrect a canceled booking.
+// Restoring a canceled/no-show booking can collide with a newer booking in
+// the same box/time (EXCLUDE) or with the customer's other active booking
+// (unique index); both surface as the same friendly 409s as Create.
+func (r *Repository) UpdateStatus(ctx context.Context, q *Queue, from Status) error {
 	updates := map[string]any{"status": q.Status}
 	switch q.Status {
 	case StatusCanceled:
@@ -229,8 +233,12 @@ func (r *Repository) UpdateStatus(ctx context.Context, q *Queue) error {
 	case StatusQueue:
 		updates["canceled_at"] = nil
 	}
-	err := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ?", q.ID).Updates(updates).Error
+	res := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ? AND status = ?", q.ID, from).Updates(updates)
+	err := res.Error
 	if err == nil {
+		if res.RowsAffected == 0 {
+			return apperror.Conflict("status_changed", "the booking was changed by someone else, reload and try again")
+		}
 		return nil
 	}
 	var pgErr *pgconn.PgError
@@ -247,12 +255,17 @@ func (r *Repository) UpdateStatus(ctx context.Context, q *Queue) error {
 
 // UpdatePausedAt writes paused_at only — a map-based update so setting it
 // back to nil (resume) is a real SQL NULL, not silently skipped the way a
-// struct-based Updates would treat a nil/zero field.
+// struct-based Updates would treat a nil/zero field. Only applies while the
+// booking is still washing (409 status_changed otherwise), so a pause racing
+// the booking being finished or canceled cannot leave a paused ready booking.
 func (r *Repository) UpdatePausedAt(ctx context.Context, q *Queue) error {
-	err := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ?", q.ID).
-		Updates(map[string]any{"paused_at": q.PausedAt}).Error
-	if err != nil {
-		return apperror.Internal(err)
+	res := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ? AND status = ?", q.ID, StatusWashing).
+		Updates(map[string]any{"paused_at": q.PausedAt})
+	if res.Error != nil {
+		return apperror.Internal(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return apperror.Conflict("status_changed", "the booking was changed by someone else, reload and try again")
 	}
 	return nil
 }
