@@ -419,3 +419,13 @@ unset). `PATCH /connection-requests/{id}` now also edits fields (status optional
 address+boxes_count → 409 `connection_request_incomplete`. Admin `POST` unchanged (all fields required).
 Follow-up (not done): q-wash-admin/q-wash-shared still type these fields as required strings and have no
 edit form for a request.
+
+## Fixed store-reviewer login (2026-10-11)
+
+Optional `REVIEW_PHONE` + `REVIEW_OTP` env vars (both or neither; validated at startup in every env). For that
+one phone `POST /auth/otp/request` returns 202 with no SMS/row, and `POST /auth/otp/verify` accepts the fixed
+code (not consumed) and logs in the normal customer account. Wrong codes use an in-memory lockout
+(`OTP_MAX_ATTEMPTS` then `OTP_COOLDOWN`, per instance, reset on restart). No migration, no new dependency, no
+contract shape change. Tests: `service_test.go`, `config_test.go`, integration `review_login_test.go`.
+Docs updated: `API.md`, `.env.example`, `docs/techstack.md`. Not done: seeding demo data for the reviewer account
+and setting the env vars in production (deploy config untouched).

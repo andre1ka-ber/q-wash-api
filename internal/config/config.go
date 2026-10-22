@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,12 @@ type AuthConfig struct {
 	OTPTTL         time.Duration
 	OTPCooldown    time.Duration // minimum time between two OTP requests for the same phone
 	OTPMaxAttempts int
+
+	// ReviewPhone and ReviewOTP configure one fixed store-reviewer login
+	// (App Store / Google Play reviewers cannot receive our SMS). Both empty
+	// means the feature is off. The reviewer account is always a customer.
+	ReviewPhone string
+	ReviewOTP   string
 }
 
 // StorageConfig configures where uploaded photos (docs/PLAN_WEB_APPS.md
@@ -146,6 +153,9 @@ func (c Config) IsProduction() bool { return c.Env == "production" }
 // startup error (a deploy may legitimately serve a public API) but is
 // reported by Warnings.
 func (c Config) Validate() error {
+	if err := c.Auth.validateReviewLogin(); err != nil {
+		return err
+	}
 	if err := c.RateLimit.validate(); err != nil {
 		return err
 	}
@@ -168,6 +178,29 @@ func (c Config) Validate() error {
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("unsafe production configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+var (
+	reviewPhoneRegexp = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
+	reviewOTPRegexp   = regexp.MustCompile(`^\d{6}$`)
+)
+
+// validateReviewLogin applies in every environment: a half-configured or
+// malformed reviewer login must stop startup, not silently stay disabled.
+func (a AuthConfig) validateReviewLogin() error {
+	if a.ReviewPhone == "" && a.ReviewOTP == "" {
+		return nil
+	}
+	if a.ReviewPhone == "" || a.ReviewOTP == "" {
+		return errors.New("REVIEW_PHONE and REVIEW_OTP must be set together")
+	}
+	if !reviewPhoneRegexp.MatchString(a.ReviewPhone) {
+		return errors.New("REVIEW_PHONE must be in E.164 format, e.g. +15551234567")
+	}
+	if !reviewOTPRegexp.MatchString(a.ReviewOTP) {
+		return errors.New("REVIEW_OTP must be exactly 6 digits")
 	}
 	return nil
 }
@@ -261,6 +294,9 @@ func Load() (Config, error) {
 	if cfg.Auth.OTPMaxAttempts, err = getInt("OTP_MAX_ATTEMPTS", 5); err != nil {
 		return Config{}, err
 	}
+	cfg.Auth.ReviewPhone = getEnv("REVIEW_PHONE", "")
+	cfg.Auth.ReviewOTP = getEnv("REVIEW_OTP", "")
+
 	if cfg.HTTP.TrustProxyHeaders, err = getBool("TRUST_PROXY_HEADERS", !cfg.IsProduction()); err != nil {
 		return Config{}, err
 	}

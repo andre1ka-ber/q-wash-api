@@ -1,4 +1,4 @@
-.PHONY: run build seed test test-integration tidy up down migrate-up migrate-down migrate-new
+.PHONY: run build seed seed-demo test test-integration tidy up down migrate-up migrate-down migrate-new
 
 run:
 	go run ./cmd/api
@@ -8,6 +8,11 @@ build:
 
 seed:
 	go run ./cmd/seed
+
+# Presentation data: 2 points, live queue in every status, demo logins.
+# Refuses production and non-local DB hosts.
+seed-demo:
+	go run ./cmd/seed-demo
 
 test:
 	go test ./...

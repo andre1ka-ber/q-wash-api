@@ -473,3 +473,16 @@ func futureBookingDate(daysAhead int) string {
 func todayBookingTime(minutesFromNow int) string {
 	return time.Now().UTC().Add(time.Duration(minutesFromNow) * time.Minute).Format(time.RFC3339)
 }
+
+// countTo returns how many messages were sent to phone.
+func (s *spySender) countTo(phone string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, m := range s.messages {
+		if m.To == phone {
+			n++
+		}
+	}
+	return n
+}

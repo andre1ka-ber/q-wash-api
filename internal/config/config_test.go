@@ -207,3 +207,36 @@ func TestLoadMonitoring(t *testing.T) {
 		}
 	})
 }
+
+func TestValidate_ReviewLogin(t *testing.T) {
+	cases := []struct {
+		name    string
+		phone   string
+		otp     string
+		wantErr string
+	}{
+		{"both unset is fine", "", "", ""},
+		{"valid pair", "+992900000000", "424242", ""},
+		{"phone without code", "+992900000000", "", "set together"},
+		{"code without phone", "", "424242", "set together"},
+		{"bad phone", "992900000000", "424242", "E.164"},
+		{"short code", "+992900000000", "4242", "6 digits"},
+		{"non-numeric code", "+992900000000", "42424a", "6 digits"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, env := range []string{"development", "production"} {
+				c := production()
+				c.Env = env
+				c.Auth.ReviewPhone, c.Auth.ReviewOTP = tc.phone, tc.otp
+				err := c.Validate()
+				if tc.wantErr == "" && err != nil {
+					t.Fatalf("env %s: unexpected error %v", env, err)
+				}
+				if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+					t.Fatalf("env %s: expected error containing %q, got %v", env, tc.wantErr, err)
+				}
+			}
+		})
+	}
+}

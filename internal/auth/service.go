@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -107,6 +108,13 @@ type Service struct {
 	sms        sms.OTPSender
 	jwtManager *jwt.Manager
 	cfg        config.AuthConfig
+	now        func() time.Time
+
+	// Failed-attempt state for the fixed reviewer login (cfg.ReviewPhone).
+	// In memory, so it resets on restart and is per instance.
+	reviewMu          sync.Mutex
+	reviewFailures    int
+	reviewLockedUntil time.Time
 
 	// loginLockout locks a username after repeated wrong passwords. nil
 	// (the default) means no lockout.
@@ -133,7 +141,35 @@ func burnPasswordCompare(password string) {
 }
 
 func NewService(repo *Repository, userRepo *user.Repository, otpSender sms.OTPSender, jwtManager *jwt.Manager, cfg config.AuthConfig) *Service {
-	return &Service{repo: repo, userRepo: userRepo, sms: otpSender, jwtManager: jwtManager, cfg: cfg}
+	return &Service{repo: repo, userRepo: userRepo, sms: otpSender, jwtManager: jwtManager, cfg: cfg, now: time.Now}
+}
+
+func (s *Service) isReviewPhone(phone string) bool {
+	return s.cfg.ReviewPhone != "" && s.cfg.ReviewOTP != "" && phone == s.cfg.ReviewPhone
+}
+
+// verifyReviewOTP checks the fixed reviewer code. Wrong codes count toward
+// the same OTPMaxAttempts limit as the normal flow; once reached, even the
+// right code is refused until OTPCooldown passes, so the fixed code cannot
+// be brute-forced.
+func (s *Service) verifyReviewOTP(code string) error {
+	s.reviewMu.Lock()
+	defer s.reviewMu.Unlock()
+
+	now := s.now()
+	if now.Before(s.reviewLockedUntil) {
+		return apperror.TooManyRequests("otp_locked", "too many incorrect attempts, try again later")
+	}
+	if subtle.ConstantTimeCompare([]byte(code), []byte(s.cfg.ReviewOTP)) != 1 {
+		s.reviewFailures++
+		if s.reviewFailures >= s.cfg.OTPMaxAttempts {
+			s.reviewFailures = 0
+			s.reviewLockedUntil = now.Add(s.cfg.OTPCooldown)
+		}
+		return apperror.BadRequest("otp_invalid", "incorrect code")
+	}
+	s.reviewFailures = 0
+	return nil
 }
 
 // RequestOTP generates a one-time code, stores its hash, and "sends" it via
@@ -142,6 +178,9 @@ func NewService(repo *Repository, userRepo *user.Repository, otpSender sms.OTPSe
 func (s *Service) RequestOTP(ctx context.Context, phone string) error {
 	if err := ValidatePhoneNumber(phone); err != nil {
 		return err
+	}
+	if s.isReviewPhone(phone) {
+		return nil
 	}
 
 	latest, err := s.repo.LatestActiveOTPCode(ctx, phone)
@@ -194,6 +233,13 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code string) (*TokenPair
 		return nil, apperror.BadRequest("invalid_code", "code must be 6 digits")
 	}
 
+	if s.isReviewPhone(phone) {
+		if err := s.verifyReviewOTP(code); err != nil {
+			return nil, err
+		}
+		return s.loginByPhone(ctx, phone, time.Now())
+	}
+
 	otp, err := s.repo.LatestActiveOTPCode(ctx, phone)
 	if err != nil {
 		return nil, err
@@ -223,6 +269,12 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code string) (*TokenPair
 		return nil, err
 	}
 
+	return s.loginByPhone(ctx, phone, now)
+}
+
+// loginByPhone finds-or-creates the customer for phone and issues a token
+// pair; shared by the normal OTP path and the fixed reviewer login.
+func (s *Service) loginByPhone(ctx context.Context, phone string, now time.Time) (*TokenPair, error) {
 	u, err := s.findOrCreateUser(ctx, phone)
 	if err != nil {
 		return nil, err
