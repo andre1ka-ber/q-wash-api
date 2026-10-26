@@ -102,47 +102,58 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			httputil.WriteError(w, r, apperror.New(http.StatusRequestEntityTooLarge, "file_too_large", "file exceeds the 10MB limit"))
-			return
-		}
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_file", "could not parse multipart form"))
-		return
-	}
-	defer r.MultipartForm.RemoveAll()
-
-	file, _, err := r.FormFile("file")
+	ext, content, closeUpload, err := ParseImageUpload(w, r)
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_file", `file is required (multipart field "file")`))
+		httputil.WriteError(w, r, err)
 		return
 	}
-	defer file.Close()
-
-	sniff := make([]byte, 512)
-	n, err := io.ReadFull(file, sniff)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		httputil.WriteError(w, r, apperror.Internal(err))
-		return
-	}
-	sniff = sniff[:n]
-	contentType := http.DetectContentType(sniff)
-	ext, ok := allowedContentTypes[contentType]
-	if !ok {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_content_type", "file must be a JPEG, PNG, GIF or WebP image"))
-		return
-	}
+	defer closeUpload()
 
 	isCover := r.FormValue("is_cover") == "true"
-	content := io.MultiReader(bytes.NewReader(sniff), file)
 	p, err := h.manager.Upload(r.Context(), washingPointID, ext, content, isCover)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusCreated, toResponse(p))
+}
+
+// ParseImageUpload reads the multipart "file" field, caps it at
+// maxUploadBytes and verifies by content sniffing that it is an allowed
+// image type. The returned closer must be called once content is consumed.
+func ParseImageUpload(w http.ResponseWriter, r *http.Request) (ext string, content io.Reader, closeUpload func(), err error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return "", nil, nil, apperror.New(http.StatusRequestEntityTooLarge, "file_too_large", "file exceeds the 10MB limit")
+		}
+		return "", nil, nil, apperror.BadRequest("invalid_file", "could not parse multipart form")
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		_ = r.MultipartForm.RemoveAll()
+		return "", nil, nil, apperror.BadRequest("invalid_file", `file is required (multipart field "file")`)
+	}
+	closeUpload = func() {
+		_ = file.Close()
+		_ = r.MultipartForm.RemoveAll()
+	}
+
+	sniff := make([]byte, 512)
+	n, err := io.ReadFull(file, sniff)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		closeUpload()
+		return "", nil, nil, apperror.Internal(err)
+	}
+	sniff = sniff[:n]
+	ext, ok := allowedContentTypes[http.DetectContentType(sniff)]
+	if !ok {
+		closeUpload()
+		return "", nil, nil, apperror.BadRequest("invalid_content_type", "file must be a JPEG, PNG, GIF or WebP image")
+	}
+	return ext, io.MultiReader(bytes.NewReader(sniff), file), closeUpload, nil
 }
 
 type updateRequest struct {

@@ -712,6 +712,83 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/queue/{id}/photos:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Photos]
+      operationId: listBookingPhotos
+      summary: List a booking's wash photos
+      description: >
+        Requires role staff, worker or admin, scoped to their own washing
+        point (404 queue_not_found for another point). Ordered by creation time.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingPhotoList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Photos]
+      operationId: uploadBookingPhoto
+      summary: Attach a photo to a booking
+      description: >
+        Requires role staff, worker or admin, scoped to their own washing
+        point. Only allowed while the booking's status is washing (409
+        booking_not_washing otherwise); at most 10 photos per booking (409
+        photo_limit_reached). Same file rules as the washing-point gallery
+        (JPEG/PNG/GIF/WebP, content-sniffed, 10MB).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+              required: [file]
+      responses:
+        "201":
+          description: Uploaded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingPhoto" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "booking_not_washing or photo_limit_reached" }
+        "413": { description: File exceeds the 10MB limit }
+
+  /api/v1/queue/{id}/photos/{photoId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: photoId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Photos]
+      operationId: deleteBookingPhoto
+      summary: Delete a booking photo
+      description: >
+        Requires role staff, worker or admin, scoped to their own washing
+        point. 404 photo_not_found if the photo belongs to another booking.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/washing-points/{id}/queue:
     parameters:
       - $ref: "#/components/parameters/washingPointId"
@@ -2812,6 +2889,21 @@ components:
         is_cover: { type: boolean }
         sort_order: { type: integer, minimum: 0 }
       required: [id, url, is_cover, sort_order]
+
+    BookingPhoto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+      required: [id, url]
+
+    BookingPhotoList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/BookingPhoto" }
+      required: [items]
 
     PhotoList:
       type: object

@@ -211,6 +211,20 @@ Photo response:
 {"id": "...", "url": "/uploads/...", "is_cover": true, "sort_order": 0}
 ```
 
+### Booking photos (worker app)
+
+Photos a technician attaches to one booking while it is being washed. Same storage, content
+sniffing and 10MB limit as the gallery above.
+
+| method | path | role | notes |
+|---|---|---|---|
+| GET | `/queue/{id}/photos` | staff, worker, admin | `{items: [{id, url}]}`, oldest first |
+| POST | `/queue/{id}/photos` | staff, worker, admin | `multipart/form-data` with a `file` field. 409 `booking_not_washing` unless the booking's status is `washing`; 409 `photo_limit_reached` at 10 photos per booking |
+| DELETE | `/queue/{id}/photos/{photoId}` | staff, worker, admin | 204; file best-effort deleted. 404 `photo_not_found` if the photo belongs to another booking |
+
+Staff/worker act only on bookings of their own washing point (404 `queue_not_found` otherwise); rows
+are deleted with the booking (`ON DELETE CASCADE`).
+
 ## Services — implemented (Phase 5)
 
 | method | path | role | notes |

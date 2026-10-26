@@ -429,3 +429,10 @@ code (not consumed) and logs in the normal customer account. Wrong codes use an 
 contract shape change. Tests: `service_test.go`, `config_test.go`, integration `review_login_test.go`.
 Docs updated: `API.md`, `.env.example`, `docs/techstack.md`. Not done: seeding demo data for the reviewer account
 and setting the env vars in production (deploy config untouched).
+
+## Booking photos (2026-10-26)
+
+Migration `000028_create_booking_photos` + `internal/bookingphoto` package: `GET/POST /queue/{id}/photos`,
+`DELETE /queue/{id}/photos/{photoId}` for staff/worker/admin (`requireQueueOps`, own point only). Upload only
+while status is `washing`, max 10 per booking. `photo.ParseImageUpload` extracted from the gallery handler so both
+share the sniffing/size rules. Tests: integration `booking_photos_test.go`. Docs: `API.md`, `openapi.yaml`.

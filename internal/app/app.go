@@ -14,6 +14,7 @@ import (
 
 	"q-wash-api/internal/admin"
 	"q-wash-api/internal/auth"
+	"q-wash-api/internal/bookingphoto"
 	"q-wash-api/internal/box"
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/config"
@@ -111,6 +112,10 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	photoManager := photo.NewManager(photoRepo, fileStorage)
 	photoHandler := photo.NewHandler(photoRepo, photoManager, wpRepo)
 
+	bookingPhotoRepo := bookingphoto.NewRepository(database)
+	bookingPhotoManager := bookingphoto.NewManager(bookingPhotoRepo, fileStorage)
+	bookingPhotoHandler := bookingphoto.NewHandler(bookingPhotoRepo, bookingPhotoManager, queueRepo)
+
 	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo)
 
 	qrCodeRepo := qrcode.NewRepository(database)
@@ -155,6 +160,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	connectionRequestHandler.RegisterRoutes(v1, ratelimit.New(10, time.Hour).Middleware, requireAdmin...)
 	adminHandler.RegisterRoutes(v1, requireAdmin...)
 	photoHandler.RegisterRoutes(v1, requireStaff...)
+	bookingPhotoHandler.RegisterRoutes(v1, requireQueueOps...)
 	scheduleHandler.RegisterRoutes(v1, requireStaff...)
 	boxHandler.RegisterRoutes(v1, requireStaff...)
 	// One limiter for both scan paths so they share a per-IP budget.
