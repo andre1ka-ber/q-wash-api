@@ -301,6 +301,10 @@ func run() error {
 		if err := database.Create(&q).Error; err != nil {
 			return fmt.Errorf("booking #%d (%s box %d): %w", n, demoPoints[b.Point].Name, b.Box, err)
 		}
+		item := queue.QueueItem{QueueID: q.ID, ServiceID: q.ServiceID, PriceOptionID: q.PriceOptionID}
+		if err := database.Create(&item).Error; err != nil {
+			return fmt.Errorf("booking #%d item: %w", n, err)
+		}
 	}
 	slog.Info("demo queue rebuilt", "bookings", len(demoBookings))
 

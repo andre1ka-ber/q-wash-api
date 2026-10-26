@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -114,9 +115,9 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serviceID, err := uuid.Parse(r.URL.Query().Get("service_id"))
+	serviceIDs, err := parseAvailabilityServiceIDs(r)
 	if err != nil {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_service_id", "service_id is required and must be a valid uuid"))
+		httputil.WriteError(w, r, err)
 		return
 	}
 
@@ -132,14 +133,18 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svc, err := h.serviceRepo.FindByID(r.Context(), serviceID)
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	if svc.WashingPointID != washingPointID {
-		httputil.WriteError(w, r, apperror.BadRequest("service_not_at_washing_point", "service does not belong to this washing point"))
-		return
+	var totalMinutes int
+	for _, serviceID := range serviceIDs {
+		svc, err := h.serviceRepo.FindByID(r.Context(), serviceID)
+		if err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
+		if svc.WashingPointID != washingPointID {
+			httputil.WriteError(w, r, apperror.BadRequest("service_not_at_washing_point", "service does not belong to this washing point"))
+			return
+		}
+		totalMinutes += svc.EffectiveQueueMinutes()
 	}
 
 	weekday := weekdayIndex(day.In(clock.BusinessLocation))
@@ -188,7 +193,7 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	duration := time.Duration(svc.EffectiveQueueMinutes()) * time.Minute
+	duration := time.Duration(totalMinutes) * time.Minute
 	slots := ComputeAvailableSlotsForDay(daySchedule, wp.BoxesCount, duration, busy)
 
 	items := make([]slotResponse, len(slots))
@@ -196,6 +201,34 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		items[i] = slotResponse{Start: s.Start, End: s.End, AvailableBoxes: s.AvailableBoxes}
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// parseAvailabilityServiceIDs reads the services to size the slots for:
+// the comma-separated `service_ids` when given, else the single `service_id`
+// (older app builds). A multi-service booking blocks a box for the sum of
+// the services' queue minutes.
+func parseAvailabilityServiceIDs(r *http.Request) ([]uuid.UUID, error) {
+	raw := r.URL.Query().Get("service_ids")
+	if raw == "" {
+		id, err := uuid.Parse(r.URL.Query().Get("service_id"))
+		if err != nil {
+			return nil, apperror.BadRequest("invalid_service_id", "service_id is required and must be a valid uuid")
+		}
+		return []uuid.UUID{id}, nil
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > maxBookingItems {
+		return nil, apperror.BadRequest("invalid_service_ids", fmt.Sprintf("at most %d services per booking", maxBookingItems))
+	}
+	ids := make([]uuid.UUID, 0, len(parts))
+	for _, p := range parts {
+		id, err := uuid.Parse(strings.TrimSpace(p))
+		if err != nil || slices.Contains(ids, id) {
+			return nil, apperror.BadRequest("invalid_service_ids", "service_ids must be distinct valid uuids, comma-separated")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // combineDayAndTime combines a calendar day with an "HH:MM" time-of-day
@@ -256,22 +289,38 @@ func resolveDaySchedule(day time.Time, row *schedule.WashingPointSchedule) (DayS
 }
 
 type bookingResponse struct {
-	ID               string     `json:"id"`
-	Status           string     `json:"status"`
-	UserID           string     `json:"user_id"`
-	CarID            string     `json:"car_id"`
-	ServiceID        string     `json:"service_id"`
-	PriceOptionID    string     `json:"price_option_id"`
-	WashingPointID   string     `json:"washing_point_id"`
-	BoxNumber        int        `json:"box_number"`
-	ScheduledStartAt time.Time  `json:"scheduled_start_at"`
-	ScheduledEndAt   time.Time  `json:"scheduled_end_at"`
-	Notes            *string    `json:"notes,omitempty"`
-	Source           string     `json:"source"`
-	CanceledAt       *time.Time `json:"canceled_at,omitempty"`
-	PausedAt         *time.Time `json:"paused_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	CarsAhead        int        `json:"cars_ahead"`
+	ID               string                `json:"id"`
+	Status           string                `json:"status"`
+	UserID           string                `json:"user_id"`
+	CarID            string                `json:"car_id"`
+	ServiceID        string                `json:"service_id"`
+	PriceOptionID    string                `json:"price_option_id"`
+	Items            []bookingItemResponse `json:"items"`
+	WashingPointID   string                `json:"washing_point_id"`
+	BoxNumber        int                   `json:"box_number"`
+	ScheduledStartAt time.Time             `json:"scheduled_start_at"`
+	ScheduledEndAt   time.Time             `json:"scheduled_end_at"`
+	Notes            *string               `json:"notes,omitempty"`
+	Source           string                `json:"source"`
+	CanceledAt       *time.Time            `json:"canceled_at,omitempty"`
+	PausedAt         *time.Time            `json:"paused_at,omitempty"`
+	CreatedAt        time.Time             `json:"created_at"`
+	CarsAhead        int                   `json:"cars_ahead"`
+}
+
+// bookingItemResponse is one service of a booking; ServiceID/PriceOptionID
+// on bookingResponse itself mirror the first item.
+type bookingItemResponse struct {
+	ServiceID     string `json:"service_id"`
+	PriceOptionID string `json:"price_option_id"`
+}
+
+func toBookingItems(q *Queue) []bookingItemResponse {
+	items := make([]bookingItemResponse, len(q.Items))
+	for i, it := range q.Items {
+		items[i] = bookingItemResponse{ServiceID: it.ServiceID.String(), PriceOptionID: it.PriceOptionID.String()}
+	}
+	return items
 }
 
 func toBookingResponse(q *Queue) bookingResponse {
@@ -282,6 +331,7 @@ func toBookingResponse(q *Queue) bookingResponse {
 		CarID:            carIDString(q.CarID),
 		ServiceID:        q.ServiceID.String(),
 		PriceOptionID:    q.PriceOptionID.String(),
+		Items:            toBookingItems(q),
 		WashingPointID:   q.WashingPointID.String(),
 		BoxNumber:        q.BoxNumber,
 		ScheduledStartAt: q.ScheduledStartAt,
@@ -315,12 +365,13 @@ func (h *Handler) withPosition(ctx context.Context, q *Queue) (bookingResponse, 
 }
 
 type createBookingRequest struct {
-	CarID            string  `json:"car_id"`
-	ServiceID        string  `json:"service_id"`
-	PriceOptionID    string  `json:"price_option_id"`
-	BoxNumber        int     `json:"box_number"`
-	ScheduledStartAt string  `json:"scheduled_start_at"`
-	Notes            *string `json:"notes"`
+	CarID            string               `json:"car_id"`
+	ServiceID        string               `json:"service_id"`
+	PriceOptionID    string               `json:"price_option_id"`
+	Items            []bookingItemRequest `json:"items"`
+	BoxNumber        int                  `json:"box_number"`
+	ScheduledStartAt string               `json:"scheduled_start_at"`
+	Notes            *string              `json:"notes"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -340,12 +391,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	serviceID, err := parseUUIDField(req.ServiceID, "service_id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	priceOptionID, err := parseUUIDField(req.PriceOptionID, "price_option_id")
+	items, err := parseBookingItems(req.Items, req.ServiceID, req.PriceOptionID)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -371,8 +417,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	q, err := h.manager.CreateBooking(r.Context(), CreateBookingInput{
 		UserID:           authUser.ID,
 		CarID:            carID,
-		ServiceID:        serviceID,
-		PriceOptionID:    priceOptionID,
+		Items:            items,
 		BoxNumber:        req.BoxNumber,
 		ScheduledStartAt: scheduledStartAt,
 		Notes:            notes,
@@ -736,7 +781,7 @@ func (h *Handler) toLiveBoxItems(ctx context.Context, boxes []box.Box, rows []Qu
 		return &liveBoxBookingResponse{
 			ID:                 row.ID.String(),
 			Status:             string(row.Status),
-			ServiceName:        refs.serviceName(row.ServiceID),
+			ServiceName:        refs.serviceLabel(row),
 			ScheduledStartAt:   row.ScheduledStartAt,
 			ScheduledEndAt:     row.ScheduledEndAt,
 			PausedAt:           row.PausedAt,
@@ -836,7 +881,7 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 		if cur, ok := currentByBox[b.Number]; ok {
 			item.Current = &boardBookingResponse{
 				Status:             string(cur.Status),
-				ServiceName:        refs.serviceName(cur.ServiceID),
+				ServiceName:        refs.serviceLabel(cur),
 				ScheduledStartAt:   cur.ScheduledStartAt,
 				ScheduledEndAt:     cur.ScheduledEndAt,
 				PausedAt:           cur.PausedAt,
@@ -854,7 +899,7 @@ func (h *Handler) buildBoardResponse(ctx context.Context, washingPointID uuid.UU
 			ID:                 row.ID.String(),
 			Status:             string(row.Status),
 			BoxNumber:          row.BoxNumber,
-			ServiceName:        refs.serviceName(row.ServiceID),
+			ServiceName:        refs.serviceLabel(row),
 			ScheduledStartAt:   row.ScheduledStartAt,
 			CustomerPhoneLast4: lastNDigits(refs.phone(row.UserID), 4),
 			CarName:            refs.carName(row.CarID),

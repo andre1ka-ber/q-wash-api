@@ -322,6 +322,13 @@ func seedQueueEntry(
 			ScheduledEndAt:   startAt.Add(duration),
 		}).
 		FirstOrCreate(&q).Error
+	if err != nil {
+		return q, err
+	}
+	// Idempotent like the booking itself: re-running the seed finds the item.
+	err = database.Where(queue.QueueItem{QueueID: q.ID, Position: 0}).
+		Attrs(queue.QueueItem{ServiceID: serviceID, PriceOptionID: priceOptionID}).
+		FirstOrCreate(&queue.QueueItem{}).Error
 	return q, err
 }
 

@@ -214,7 +214,9 @@ func (r *Repository) FirstPriceOptionExcept(ctx context.Context, serviceID, excl
 // queue will need to import service in a later phase to validate bookings.
 func (r *Repository) CountQueueUsingPriceOption(ctx context.Context, priceOptionID uuid.UUID) (int64, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Table("queue").Where("price_option_id = ?", priceOptionID).Count(&count).Error
+	// queue_items holds every service of a booking (the queue column only
+	// mirrors the first), so it is the authoritative reference check.
+	err := r.db.WithContext(ctx).Table("queue_items").Where("price_option_id = ?", priceOptionID).Count(&count).Error
 	if err != nil {
 		return 0, apperror.Internal(err)
 	}

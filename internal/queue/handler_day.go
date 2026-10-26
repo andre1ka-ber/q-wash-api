@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,9 +32,21 @@ type dayItemResponse struct {
 	Plate            string     `json:"plate,omitempty"`
 	ClientName       string     `json:"client_name,omitempty"`
 	ClientPhone      string     `json:"client_phone"`
-	ServiceName      string     `json:"service_name"`
-	PriceOptionName  string     `json:"price_option_name"`
-	PriceCents       int        `json:"price_cents"`
+	// ServiceName joins every service's name, PriceOptionName is set only
+	// for a single-service booking, and PriceCents is the total; Items has
+	// the per-service breakdown.
+	ServiceName     string        `json:"service_name"`
+	PriceOptionName string        `json:"price_option_name"`
+	PriceCents      int           `json:"price_cents"`
+	Items           []dayItemLine `json:"items"`
+}
+
+type dayItemLine struct {
+	ServiceID       string `json:"service_id"`
+	ServiceName     string `json:"service_name"`
+	PriceOptionID   string `json:"price_option_id"`
+	PriceOptionName string `json:"price_option_name"`
+	PriceCents      int    `json:"price_cents"`
 }
 
 // ticketNumberBase is where each box's per-day ticket counter starts, so
@@ -81,7 +94,15 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 	if err != nil {
 		return nil, err
 	}
-	options, err := h.serviceRepo.FindPriceOptionsByIDs(ctx, uniqueIDs(rows, func(q Queue) uuid.UUID { return q.PriceOptionID }))
+	optionIDs := uniqueIDs(rows, func(q Queue) uuid.UUID { return q.PriceOptionID })
+	for _, row := range rows {
+		for _, it := range row.Items {
+			if !slices.Contains(optionIDs, it.PriceOptionID) {
+				optionIDs = append(optionIDs, it.PriceOptionID)
+			}
+		}
+	}
+	options, err := h.serviceRepo.FindPriceOptionsByIDs(ctx, optionIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -123,9 +144,23 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 			Source:           string(row.Source),
 			CarName:          c.Name,
 			ClientPhone:      u.PhoneOrEmpty(),
-			ServiceName:      refs.serviceName(row.ServiceID),
-			PriceOptionName:  optionByID[row.PriceOptionID].Name,
-			PriceCents:       optionByID[row.PriceOptionID].PriceCents,
+			ServiceName:      refs.serviceLabel(row),
+		}
+		lines := make([]dayItemLine, len(row.Items))
+		for j, it := range row.Items {
+			opt := optionByID[it.PriceOptionID]
+			lines[j] = dayItemLine{
+				ServiceID:       it.ServiceID.String(),
+				ServiceName:     refs.serviceName(it.ServiceID),
+				PriceOptionID:   it.PriceOptionID.String(),
+				PriceOptionName: opt.Name,
+				PriceCents:      opt.PriceCents,
+			}
+			item.PriceCents += opt.PriceCents
+		}
+		item.Items = lines
+		if len(lines) == 1 {
+			item.PriceOptionName = lines[0].PriceOptionName
 		}
 		if u.Name != nil {
 			item.ClientName = *u.Name
@@ -139,14 +174,15 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 }
 
 type createManualBookingRequest struct {
-	ServiceID        string `json:"service_id"`
-	PriceOptionID    string `json:"price_option_id"`
-	BoxNumber        int    `json:"box_number"`
-	ScheduledStartAt string `json:"scheduled_start_at"`
-	CarName          string `json:"car_name"`
-	Plate            string `json:"plate"`
-	ClientPhone      string `json:"client_phone"`
-	ClientName       string `json:"client_name"`
+	ServiceID        string               `json:"service_id"`
+	PriceOptionID    string               `json:"price_option_id"`
+	Items            []bookingItemRequest `json:"items"`
+	BoxNumber        int                  `json:"box_number"`
+	ScheduledStartAt string               `json:"scheduled_start_at"`
+	CarName          string               `json:"car_name"`
+	Plate            string               `json:"plate"`
+	ClientPhone      string               `json:"client_phone"`
+	ClientName       string               `json:"client_name"`
 }
 
 // createManual is the cabinet's "Добавить вручную" (staff/worker/admin at
@@ -164,12 +200,7 @@ func (h *Handler) createManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serviceID, err := parseUUIDField(req.ServiceID, "service_id")
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	priceOptionID, err := parseUUIDField(req.PriceOptionID, "price_option_id")
+	bookingItems, err := parseBookingItems(req.Items, req.ServiceID, req.PriceOptionID)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -202,8 +233,7 @@ func (h *Handler) createManual(w http.ResponseWriter, r *http.Request) {
 
 	q, err := h.manager.CreateManualBooking(r.Context(), CreateManualBookingInput{
 		WashingPointID:   washingPointID,
-		ServiceID:        serviceID,
-		PriceOptionID:    priceOptionID,
+		Items:            bookingItems,
 		BoxNumber:        req.BoxNumber,
 		ScheduledStartAt: start,
 		CarName:          carName,

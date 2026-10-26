@@ -254,16 +254,19 @@ The booking / queue entry. Central entity tying everything together.
 | source | enum: `app`, `qr`, `manual`, default `app` | where the booking came from (migration `000022`). `manual` = staff walk-in via `POST /washing-points/{id}/queue/manual`; `qr` is reserved (nothing sets it yet) |
 | user_id | uuid | FK -> User |
 | car_id | uuid, nullable | FK -> Car. Null only for staff walk-in bookings added without any car data (migration `000023`); API responses report the zero UUID for it |
-| service_id | uuid | FK -> Service |
-| price_option_id | uuid | FK -> ServicePriceOption, resolved price/duration snapshot at booking time |
+| service_id | uuid | FK -> Service. Mirror of the first `queue_items` row (position 0) — kept so older clients/queries that know one service keep working; dropped by a later migration once old app builds are gone |
+| price_option_id | uuid | FK -> ServicePriceOption. Mirror of the first item's price option (see above) |
 | washing_point_id | uuid | FK -> WashingPoint, denormalized for query convenience |
 | box_number | int, not null | 1..boxes_count, client-chosen at booking time (validated against `boxes_count` and actual availability, never auto-assigned) |
 | scheduled_start_at | timestamp | requested slot start |
-| scheduled_end_at | timestamp | `scheduled_start_at + COALESCE(service.queue_minutes, service.duration_minutes)`, stored for fast overlap queries |
+| scheduled_end_at | timestamp | `scheduled_start_at +` the SUM over the booking's items of `COALESCE(service.queue_minutes, service.duration_minutes)`, stored for fast overlap queries |
 | notes | string, nullable | free-text, optional |
 | canceled_at | timestamp, nullable | |
 | paused_at | timestamp, nullable | only meaningful while `status = washing`. Toggled by `PATCH /queue/{id}/pause`/`/resume` (staff/worker/admin, `docs/PLAN_WEB_APPS.md` phase 7) via `queue.Manager.Pause`/`Resume` — 409 `cannot_pause`/`cannot_resume` outside `status = washing` or on a redundant call. Deliberately not a new `status` value: the forward-only state machine below stays untouched. |
 | created_at / updated_at | timestamp | |
+
+#### QueueItem (`queue_items`, migration `000029`)
+One service of a booking, so a booking can combine several services. `id` uuid PK, `queue_id` FK -> Queue (`ON DELETE CASCADE`), `service_id` FK -> Service, `price_option_id` FK -> ServicePriceOption (both `RESTRICT`), `position` int (0 = primary, mirrored into `queue.service_id`/`price_option_id`), `created_at`. Unique `(queue_id, position)` and `(queue_id, service_id)` — a service can appear once per booking. Max 8 items per booking (app-enforced, `maxBookingItems`). The migration backfills one item per existing booking (reusing the queue id as the item id). Total price = sum of the items' price options (computed at read time, like the single price was); `service.CountQueueUsingPriceOption` (price-option delete guard) reads this table.
 
 State machine: `queue -> waiting -> washing -> ready`; staff may also mark `no_show` from `queue`/`waiting`, and restore a `no_show` or `canceled` booking back to `queue` (`staffStatusTransitions` in `queue/manager.go`; the restore is re-checked by the box-overlap `EXCLUDE`, which ignores both `canceled` and `no_show` rows, and by the one-active-booking index). `canceled` reachable only from `queue` or `waiting` (spec: "cancel queue before changing status to washing"). No transition skips a stage; enforced in `queue.Manager` (app layer, not a DB constraint) — `PATCH /queue/{id}/status` (staff/worker/admin as of phase 7) drives the forward path one step at a time, `PATCH /queue/{id}/cancel` is the only way to reach `canceled` — the booking's own owner, or staff/worker/admin at its washing point (broadened from owner-only in phase 7, for the worker app's "Снять" no-show action; `queue.Manager.CancelBooking` itself no longer checks ownership — `queue.Handler.cancel` does, before calling it, same layering `updateStatus`/`pause`/`resume` already used).
 

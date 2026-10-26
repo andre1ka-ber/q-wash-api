@@ -53,11 +53,19 @@ func NewManager(db *gorm.DB, repo *Repository, carRepo *car.Repository, serviceR
 	return &Manager{db: db, repo: repo, carRepo: carRepo, serviceRepo: serviceRepo, wpRepo: wpRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
 }
 
+// maxBookingItems caps how many services one booking can combine.
+const maxBookingItems = 8
+
+// BookingItem is one requested service with its chosen price option.
+type BookingItem struct {
+	ServiceID     uuid.UUID
+	PriceOptionID uuid.UUID
+}
+
 type CreateBookingInput struct {
 	UserID           uuid.UUID
 	CarID            uuid.UUID
-	ServiceID        uuid.UUID
-	PriceOptionID    uuid.UUID
+	Items            []BookingItem
 	BoxNumber        int
 	ScheduledStartAt time.Time
 	Notes            *string
@@ -68,7 +76,7 @@ type CreateBookingInput struct {
 // service/point and the operating-hours window the new booking must fit.
 type bookingPlan struct {
 	wp       *washingpoint.WashingPoint
-	svc      *service.Service
+	items    []QueueItem
 	end      time.Time
 	dayOpen  time.Time
 	dayClose time.Time
@@ -80,30 +88,55 @@ type bookingPlan struct {
 // customer bookings (start must be after now) and false for staff
 // walk-ins, which start "now" by definition. expectWashingPoint, when
 // non-nil, additionally requires the service to belong to that point.
-func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid.UUID, boxNumber int, start time.Time, requireFuture bool, expectWashingPoint *uuid.UUID) (*bookingPlan, error) {
-	svc, err := m.serviceRepo.FindByID(ctx, serviceID)
-	if err != nil {
-		return nil, err
+func (m *Manager) planBooking(ctx context.Context, items []BookingItem, boxNumber int, start time.Time, requireFuture bool, expectWashingPoint *uuid.UUID) (*bookingPlan, error) {
+	if len(items) == 0 {
+		return nil, apperror.BadRequest("invalid_items", "at least one service is required")
 	}
-	if expectWashingPoint != nil && svc.WashingPointID != *expectWashingPoint {
-		return nil, apperror.NotFound("service_not_found", "service not found")
-	}
-	if !svc.IsActive {
-		return nil, apperror.BadRequest("service_inactive", "service is not currently available")
+	if len(items) > maxBookingItems {
+		return nil, apperror.BadRequest("invalid_items", fmt.Sprintf("at most %d services per booking", maxBookingItems))
 	}
 
-	hasPriceOption := false
-	for _, po := range svc.PriceOptions {
-		if po.ID == priceOptionID {
-			hasPriceOption = true
-			break
+	var washingPointID uuid.UUID
+	var totalMinutes int
+	planItems := make([]QueueItem, 0, len(items))
+	seen := make(map[uuid.UUID]bool, len(items))
+	for _, it := range items {
+		if seen[it.ServiceID] {
+			return nil, apperror.BadRequest("duplicate_service", "a service can be added to a booking only once")
 		}
-	}
-	if !hasPriceOption {
-		return nil, apperror.BadRequest("invalid_price_option", "price option does not belong to this service")
+		seen[it.ServiceID] = true
+
+		svc, err := m.serviceRepo.FindByID(ctx, it.ServiceID)
+		if err != nil {
+			return nil, err
+		}
+		if expectWashingPoint != nil && svc.WashingPointID != *expectWashingPoint {
+			return nil, apperror.NotFound("service_not_found", "service not found")
+		}
+		if washingPointID == uuid.Nil {
+			washingPointID = svc.WashingPointID
+		} else if svc.WashingPointID != washingPointID {
+			return nil, apperror.BadRequest("service_not_at_washing_point", "all services must belong to the same washing point")
+		}
+		if !svc.IsActive {
+			return nil, apperror.BadRequest("service_inactive", "service is not currently available")
+		}
+
+		hasPriceOption := false
+		for _, po := range svc.PriceOptions {
+			if po.ID == it.PriceOptionID {
+				hasPriceOption = true
+				break
+			}
+		}
+		if !hasPriceOption {
+			return nil, apperror.BadRequest("invalid_price_option", "price option does not belong to this service")
+		}
+		totalMinutes += svc.EffectiveQueueMinutes()
+		planItems = append(planItems, QueueItem{ServiceID: it.ServiceID, PriceOptionID: it.PriceOptionID})
 	}
 
-	wp, err := m.wpRepo.FindByID(ctx, svc.WashingPointID)
+	wp, err := m.wpRepo.FindByID(ctx, washingPointID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +159,7 @@ func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid
 		return nil, apperror.BadRequest("invalid_scheduled_start_at", "scheduled_start_at must be in the future")
 	}
 
-	end := start.Add(time.Duration(svc.EffectiveQueueMinutes()) * time.Minute)
+	end := start.Add(time.Duration(totalMinutes) * time.Minute)
 
 	weekday := weekdayIndex(start.In(clock.BusinessLocation))
 	scheduleRow, err := m.scheduleRepo.FindByWeekday(ctx, wp.ID, weekday)
@@ -140,7 +173,7 @@ func (m *Manager) planBooking(ctx context.Context, serviceID, priceOptionID uuid
 	if !daySchedule.Contains(start, end) {
 		return nil, apperror.BadRequest("outside_operating_hours", "requested time is outside the washing point's operating hours")
 	}
-	return &bookingPlan{wp: wp, svc: svc, end: end, dayOpen: daySchedule.Open, dayClose: daySchedule.Close}, nil
+	return &bookingPlan{wp: wp, items: planItems, end: end, dayOpen: daySchedule.Open, dayClose: daySchedule.Close}, nil
 }
 
 // insertLocked locks the washing point row, re-reads the day's busy
@@ -197,7 +230,7 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, apperror.Conflict("active_booking_exists", "you already have an active booking")
 	}
 
-	plan, err := m.planBooking(ctx, in.ServiceID, in.PriceOptionID, in.BoxNumber, in.ScheduledStartAt, true, nil)
+	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +240,9 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		Source:           SourceApp,
 		UserID:           in.UserID,
 		CarID:            &in.CarID,
-		ServiceID:        in.ServiceID,
-		PriceOptionID:    in.PriceOptionID,
+		ServiceID:        plan.items[0].ServiceID,
+		PriceOptionID:    plan.items[0].PriceOptionID,
+		Items:            plan.items,
 		WashingPointID:   plan.wp.ID,
 		BoxNumber:        in.BoxNumber,
 		ScheduledStartAt: in.ScheduledStartAt,
@@ -224,8 +258,7 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 
 type CreateManualBookingInput struct {
 	WashingPointID   uuid.UUID
-	ServiceID        uuid.UUID
-	PriceOptionID    uuid.UUID
+	Items            []BookingItem
 	BoxNumber        int
 	ScheduledStartAt time.Time
 	CarName          string
@@ -243,7 +276,7 @@ type CreateManualBookingInput struct {
 // existing account with a non-customer role (staff/worker/admin) is
 // rejected rather than booked against. Always starts in StatusQueue.
 func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookingInput) (*Queue, error) {
-	plan, err := m.planBooking(ctx, in.ServiceID, in.PriceOptionID, in.BoxNumber, in.ScheduledStartAt, false, &in.WashingPointID)
+	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, false, &in.WashingPointID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +284,9 @@ func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookin
 	q := &Queue{
 		Status:           StatusQueue,
 		Source:           SourceManual,
-		ServiceID:        in.ServiceID,
-		PriceOptionID:    in.PriceOptionID,
+		ServiceID:        plan.items[0].ServiceID,
+		PriceOptionID:    plan.items[0].PriceOptionID,
+		Items:            plan.items,
 		WashingPointID:   plan.wp.ID,
 		BoxNumber:        in.BoxNumber,
 		ScheduledStartAt: in.ScheduledStartAt,

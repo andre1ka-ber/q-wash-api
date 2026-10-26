@@ -50,7 +50,7 @@ func (r *Repository) FindActiveBookingsInRange(ctx context.Context, washingPoint
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
-	return rows, nil
+	return r.attachItems(ctx, rows)
 }
 
 // FindByWashingPointAndRange returns every booking (any status, including
@@ -69,7 +69,7 @@ func (r *Repository) FindByWashingPointAndRange(ctx context.Context, washingPoin
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
-	return rows, nil
+	return r.attachItems(ctx, rows)
 }
 
 // CountActiveAhead returns how many other bookings at washingPointID are
@@ -113,6 +113,11 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (*Queue, error)
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
+	items, err := r.itemsFor(ctx, []uuid.UUID{q.ID})
+	if err != nil {
+		return nil, err
+	}
+	q.Items = items[q.ID]
 	return &q, nil
 }
 
@@ -138,7 +143,7 @@ func (r *Repository) ListLiveByWashingPointAndDate(ctx context.Context, washingP
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
-	return rows, nil
+	return r.attachItems(ctx, rows)
 }
 
 // ListLive returns bookings still active in the physical queue
@@ -154,7 +159,7 @@ func (r *Repository) ListLive(ctx context.Context, washingPointID *uuid.UUID) ([
 	if err := query.Order("scheduled_start_at").Find(&rows).Error; err != nil {
 		return nil, apperror.Internal(err)
 	}
-	return rows, nil
+	return r.attachItems(ctx, rows)
 }
 
 // ListByUser returns userID's bookings across all statuses (history), most
@@ -175,6 +180,10 @@ func (r *Repository) ListByUser(ctx context.Context, userID uuid.UUID, offset, l
 	if err != nil {
 		return nil, 0, apperror.Internal(err)
 	}
+	rows, err = r.attachItems(ctx, rows)
+	if err != nil {
+		return nil, 0, err
+	}
 	return rows, total, nil
 }
 
@@ -183,6 +192,9 @@ func (r *Repository) ListByUser(ctx context.Context, userID uuid.UUID, offset, l
 // translated into a friendly 409 rather than a raw DB error.
 func (r *Repository) Create(ctx context.Context, q *Queue) error {
 	err := r.db.WithContext(ctx).Create(q).Error
+	if err == nil {
+		err = r.createItems(ctx, q)
+	}
 	if err == nil {
 		return nil
 	}
@@ -213,7 +225,7 @@ func (r *Repository) FindScheduledInRangeNetworkWide(ctx context.Context, rangeS
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
-	return rows, nil
+	return r.attachItems(ctx, rows)
 }
 
 // UpdateStatus writes status (plus canceled_at: set on cancel, cleared on
@@ -312,4 +324,50 @@ func (r *Repository) CountCreatedNearTimes(ctx context.Context, washingPointID u
 		}
 	}
 	return count, nil
+}
+
+// createItems inserts q.Items (position order, ids assigned) after q itself,
+// inside the same transaction when the Repository is bound to one.
+func (r *Repository) createItems(ctx context.Context, q *Queue) error {
+	for i := range q.Items {
+		q.Items[i].QueueID = q.ID
+		q.Items[i].Position = i
+	}
+	if len(q.Items) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Create(&q.Items).Error
+}
+
+// itemsFor loads the items of the given bookings in one query, keyed by
+// queue id, each list in position order.
+func (r *Repository) itemsFor(ctx context.Context, queueIDs []uuid.UUID) (map[uuid.UUID][]QueueItem, error) {
+	byQueue := make(map[uuid.UUID][]QueueItem, len(queueIDs))
+	if len(queueIDs) == 0 {
+		return byQueue, nil
+	}
+	var items []QueueItem
+	if err := r.db.WithContext(ctx).Where("queue_id IN ?", queueIDs).Order("queue_id, position").Find(&items).Error; err != nil {
+		return nil, apperror.Internal(err)
+	}
+	for _, it := range items {
+		byQueue[it.QueueID] = append(byQueue[it.QueueID], it)
+	}
+	return byQueue, nil
+}
+
+// attachItems fills Items on every row and returns the same slice.
+func (r *Repository) attachItems(ctx context.Context, rows []Queue) ([]Queue, error) {
+	ids := make([]uuid.UUID, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+	}
+	items, err := r.itemsFor(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].Items = items[rows[i].ID]
+	}
+	return rows, nil
 }

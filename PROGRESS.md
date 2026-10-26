@@ -436,3 +436,15 @@ Migration `000028_create_booking_photos` + `internal/bookingphoto` package: `GET
 `DELETE /queue/{id}/photos/{photoId}` for staff/worker/admin (`requireQueueOps`, own point only). Upload only
 while status is `washing`, max 10 per booking. `photo.ParseImageUpload` extracted from the gallery handler so both
 share the sniffing/size rules. Tests: integration `booking_photos_test.go`. Docs: `API.md`, `openapi.yaml`.
+
+## Multi-service bookings (2026-10-26)
+
+Migration `000029_create_queue_items` (additive; backfills one item per booking; `queue.service_id`/`price_option_id`
+stay as a mirror of item 0 — drop them in a later migration once old app builds are gone). `POST /queue` and
+`POST .../queue/manual` accept `items: [{service_id, price_option_id}]` (1–8, distinct, one point) alongside the legacy
+single pair; `GET .../availability` accepts `service_ids=a,b` (slots sized for the summed queue minutes). Booking, day,
+board and live-box responses carry `items`; `service_name` is comma-joined, day `price_cents` is the total. Reports sum
+price per booking and count revenue/count per item per service. `queue.Repository` fills `Queue.Items` in every finder
+(`attachItems`, one batched query) and inserts them with the booking (`Create`). Price-option delete guard now reads
+`queue_items`. Seeds create items. Tests: integration `multi_service_booking_test.go`. Docs: `API.md`, `openapi.yaml`,
+`DATA_MODEL.md`. Deploy this before releasing clients that send `items`.

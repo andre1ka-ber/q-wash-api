@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,6 +71,19 @@ func (r *rowRefs) carName(id *uuid.UUID) string {
 }
 func (r *rowRefs) serviceName(id uuid.UUID) string { return r.services[id].Name }
 
+// serviceLabel is the names of all of a booking's services, comma-joined —
+// what single-name fields (board, live boxes) show for a multi-service booking.
+func (r *rowRefs) serviceLabel(q Queue) string {
+	if len(q.Items) == 0 {
+		return r.serviceName(q.ServiceID)
+	}
+	names := make([]string, len(q.Items))
+	for i, it := range q.Items {
+		names[i] = r.serviceName(it.ServiceID)
+	}
+	return strings.Join(names, ", ")
+}
+
 // loadRefs batch-fetches the users and cars for rows, plus their services
 // when withServices is set (the public-facing board/board-items shapes
 // don't need service names, so they skip that query).
@@ -105,7 +120,15 @@ func (h *Handler) loadRefs(ctx context.Context, rows []Queue, withServices bool)
 		refs.cars[c.ID] = c
 	}
 	if withServices {
-		services, err := h.serviceRepo.FindByIDs(ctx, uniqueIDs(rows, func(q Queue) uuid.UUID { return q.ServiceID }))
+		serviceIDs := uniqueIDs(rows, func(q Queue) uuid.UUID { return q.ServiceID })
+		for _, row := range rows {
+			for _, it := range row.Items {
+				if !slices.Contains(serviceIDs, it.ServiceID) {
+					serviceIDs = append(serviceIDs, it.ServiceID)
+				}
+			}
+		}
+		services, err := h.serviceRepo.FindByIDs(ctx, serviceIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -135,6 +158,34 @@ func parseUUIDField(raw, field string) (uuid.UUID, error) {
 		return uuid.Nil, apperror.BadRequest("invalid_"+field, field+" must be a valid uuid")
 	}
 	return id, nil
+}
+
+// bookingItemRequest is one service of a create-booking request body.
+type bookingItemRequest struct {
+	ServiceID     string `json:"service_id"`
+	PriceOptionID string `json:"price_option_id"`
+}
+
+// parseBookingItems reads the requested services: the `items` list when
+// present, else the single legacy service_id/price_option_id pair (still
+// sent by app builds that predate multi-service bookings).
+func parseBookingItems(items []bookingItemRequest, legacyServiceID, legacyPriceOptionID string) ([]BookingItem, error) {
+	if len(items) == 0 {
+		items = []bookingItemRequest{{ServiceID: legacyServiceID, PriceOptionID: legacyPriceOptionID}}
+	}
+	parsed := make([]BookingItem, len(items))
+	for i, it := range items {
+		serviceID, err := parseUUIDField(it.ServiceID, "service_id")
+		if err != nil {
+			return nil, err
+		}
+		priceOptionID, err := parseUUIDField(it.PriceOptionID, "price_option_id")
+		if err != nil {
+			return nil, err
+		}
+		parsed[i] = BookingItem{ServiceID: serviceID, PriceOptionID: priceOptionID}
+	}
+	return parsed, nil
 }
 
 func parseScheduledStart(raw string) (time.Time, error) {

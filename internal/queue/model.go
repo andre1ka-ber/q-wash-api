@@ -52,6 +52,12 @@ type Queue struct {
 	PausedAt  *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Items are the booking's services in position order. Not a gorm
+	// association: Create inserts them in the same transaction as the row,
+	// and the Repository finders fill them in with one batched query
+	// (see attachItems).
+	Items []QueueItem `gorm:"-"`
 }
 
 func (Queue) TableName() string { return "queue" }
@@ -63,6 +69,31 @@ func (q *Queue) BeforeCreate(tx *gorm.DB) error {
 			return err
 		}
 		q.ID = id
+	}
+	return nil
+}
+
+// QueueItem is one service (with its chosen price option) of a booking.
+// Position 0 is the primary item, mirrored into Queue.ServiceID /
+// Queue.PriceOptionID for clients that only know one service.
+type QueueItem struct {
+	ID            uuid.UUID `gorm:"type:uuid;primaryKey"`
+	QueueID       uuid.UUID `gorm:"type:uuid;not null;index"`
+	ServiceID     uuid.UUID `gorm:"type:uuid;not null"`
+	PriceOptionID uuid.UUID `gorm:"type:uuid;not null"`
+	Position      int       `gorm:"not null"`
+	CreatedAt     time.Time
+}
+
+func (QueueItem) TableName() string { return "queue_items" }
+
+func (i *QueueItem) BeforeCreate(tx *gorm.DB) error {
+	if i.ID == uuid.Nil {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		i.ID = id
 	}
 	return nil
 }

@@ -334,20 +334,22 @@ func summarizeReportRows(rows []Queue, priceByOption map[uuid.UUID]int64) (repor
 		if row.Status != StatusReady {
 			continue
 		}
-		price := priceByOption[row.PriceOptionID]
+		price := bookingPrice(row, priceByOption)
 		minutes := int64(row.ScheduledEndAt.Sub(row.ScheduledStartAt).Minutes())
 
 		total.cars++
 		total.revenueCents += price
 		total.bookedMinutes += minutes
 
-		svc := byService[row.ServiceID]
-		if svc == nil {
-			svc = &reportAgg{}
-			byService[row.ServiceID] = svc
+		for _, it := range itemsOf(row) {
+			svc := byService[it.ServiceID]
+			if svc == nil {
+				svc = &reportAgg{}
+				byService[it.ServiceID] = svc
+			}
+			svc.cars++
+			svc.revenueCents += priceByOption[it.PriceOptionID]
 		}
-		svc.cars++
-		svc.revenueCents += price
 
 		bx := byBox[row.BoxNumber]
 		if bx == nil {
@@ -360,6 +362,24 @@ func summarizeReportRows(rows []Queue, priceByOption map[uuid.UUID]int64) (repor
 	}
 
 	return total, byService, byBox
+}
+
+// itemsOf is a booking's services; rows loaded without items (or created
+// before multi-service bookings) fall back to the mirrored primary service.
+func itemsOf(row Queue) []QueueItem {
+	if len(row.Items) > 0 {
+		return row.Items
+	}
+	return []QueueItem{{ServiceID: row.ServiceID, PriceOptionID: row.PriceOptionID}}
+}
+
+// bookingPrice is the sum of the price of every item's chosen option.
+func bookingPrice(row Queue, priceByOption map[uuid.UUID]int64) int64 {
+	var total int64
+	for _, it := range itemsOf(row) {
+		total += priceByOption[it.PriceOptionID]
+	}
+	return total
 }
 
 func safeDivInt(numerator, denominator int64) int64 {
@@ -398,7 +418,7 @@ func reportBars(period reportPeriod, start, end, now time.Time, rows []Queue, pr
 		if idx < 0 || idx >= len(buckets) {
 			continue
 		}
-		buckets[idx].revenue += priceByOption[row.PriceOptionID]
+		buckets[idx].revenue += bookingPrice(row, priceByOption)
 	}
 
 	nowLocal := now.In(clock.BusinessLocation)

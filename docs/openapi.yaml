@@ -478,8 +478,17 @@ paths:
       parameters:
         - name: service_id
           in: query
-          required: true
+          required: false
+          description: One service. Required unless `service_ids` is given.
           schema: { type: string, format: uuid }
+        - name: service_ids
+          in: query
+          required: false
+          description: >
+            Several comma-separated, distinct service ids (max 8) of a
+            multi-service booking; slots are sized for the SUM of their
+            queue_minutes. Takes precedence over `service_id`.
+          schema: { type: string, example: "uuid1,uuid2" }
         - name: date
           in: query
           required: true
@@ -891,15 +900,17 @@ paths:
             schema:
               type: object
               properties:
-                service_id: { type: string, format: uuid }
-                price_option_id: { type: string, format: uuid }
+                items: { $ref: "#/components/schemas/BookingItemsInput" }
+                service_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
+                price_option_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
                 box_number: { type: integer, minimum: 1 }
                 scheduled_start_at: { type: string, format: date-time }
                 car_name: { type: string, maxLength: 255 }
                 plate: { type: string, maxLength: 32 }
                 client_phone: { type: string, example: "900000000", description: "E.164, or a local number (+992 is added)." }
                 client_name: { type: string, maxLength: 255 }
-              required: [service_id, price_option_id, box_number, scheduled_start_at, client_phone]
+              required: [box_number, scheduled_start_at, client_phone]
+              description: Send `items` (or, for older clients, `service_id` + `price_option_id`).
       responses:
         "201":
           description: Created
@@ -2409,8 +2420,9 @@ components:
         source: { type: string, enum: [app, qr, manual] }
         user_id: { type: string, format: uuid }
         car_id: { type: string, format: uuid }
-        service_id: { type: string, format: uuid }
-        price_option_id: { type: string, format: uuid }
+        service_id: { type: string, format: uuid, description: "Mirrors items[0]." }
+        price_option_id: { type: string, format: uuid, description: "Mirrors items[0]." }
+        items: { $ref: "#/components/schemas/BookingItemsInput" }
         washing_point_id: { type: string, format: uuid }
         box_number: { type: integer, minimum: 1 }
         scheduled_start_at: { type: string, format: date-time }
@@ -2447,10 +2459,20 @@ components:
         plate: { type: string }
         client_name: { type: string }
         client_phone: { type: string }
-        service_name: { type: string }
-        price_option_name: { type: string }
-        price_cents: { type: integer }
-      required: [id, status, ticket, box_number, scheduled_start_at, scheduled_end_at, source, client_phone, service_name, price_option_name, price_cents]
+        service_name: { type: string, description: "Every service's name, comma-joined." }
+        price_option_name: { type: string, description: "Set only for a single-service booking." }
+        price_cents: { type: integer, description: "Total over all items." }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id: { type: string, format: uuid }
+              service_name: { type: string }
+              price_option_id: { type: string, format: uuid }
+              price_option_name: { type: string }
+              price_cents: { type: integer }
+      required: [id, status, ticket, box_number, scheduled_start_at, scheduled_end_at, source, client_phone, service_name, price_option_name, price_cents, items]
 
     BoardItem:
       type: object
@@ -2629,8 +2651,9 @@ components:
       type: object
       properties:
         car_id: { type: string, format: uuid }
-        service_id: { type: string, format: uuid }
-        price_option_id: { type: string, format: uuid }
+        items: { $ref: "#/components/schemas/BookingItemsInput" }
+        service_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
+        price_option_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
         box_number:
           type: integer
           minimum: 1
@@ -2640,7 +2663,26 @@ components:
             it is free for the requested window but never auto-assigns it.
         scheduled_start_at: { type: string, format: date-time }
         notes: { type: string, maxLength: 2000 }
-      required: [car_id, service_id, price_option_id, box_number, scheduled_start_at]
+      required: [car_id, box_number, scheduled_start_at]
+      description: Send `items` (or, for older clients, `service_id` + `price_option_id`).
+
+    BookingItemInput:
+      type: object
+      properties:
+        service_id: { type: string, format: uuid }
+        price_option_id: { type: string, format: uuid }
+      required: [service_id, price_option_id]
+
+    BookingItemsInput:
+      type: array
+      minItems: 1
+      maxItems: 8
+      description: >
+        The booking's services (with their chosen price options), in order.
+        Distinct, same washing point, all active. The booking blocks a box
+        for the sum of the services' queue_minutes (400 `duplicate_service`,
+        `invalid_items`, `service_not_at_washing_point`).
+      items: { $ref: "#/components/schemas/BookingItemInput" }
 
     BookingStatusUpdate:
       type: object
