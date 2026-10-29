@@ -409,7 +409,8 @@ paths:
         docs/API.md's "Washing point credentials"). Staff may only read
         their own point's — 404 for any other, same as PATCH/DELETE
         /washing-points/{id}; admin has no such restriction. Never public,
-        unlike GET .../photos or .../schedule.
+        unlike GET .../photos or .../schedule. A role the point has no
+        account for is null (create it with POST .../credentials/{role}).
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -419,12 +420,42 @@ paths:
               schema:
                 type: object
                 properties:
-                  staff: { type: object, properties: { username: { type: string } }, required: [username] }
-                  worker: { type: object, properties: { username: { type: string } }, required: [username] }
+                  staff: { type: object, nullable: true, properties: { username: { type: string } }, required: [username] }
+                  worker: { type: object, nullable: true, properties: { username: { type: string } }, required: [username] }
                 required: [staff, worker]
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/washing-points/{id}/credentials/{role}:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+      - name: role
+        in: path
+        required: true
+        schema: { type: string, enum: [staff, worker] }
+    post:
+      tags: [Washing points]
+      operationId: createWashingPointCredentials
+      summary: Create a washing point's missing staff or worker login
+      description: >
+        Requires role staff or admin. For a point that has no account for
+        the role (see the nullable fields of GET .../credentials). Returns
+        the new plaintext password once. Staff may only act on their own
+        point (404 otherwise). 409 credentials_exist if the account is
+        already there — use the reset endpoint instead.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Credential" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/washing-points/{id}/credentials/{role}/reset:
     parameters:

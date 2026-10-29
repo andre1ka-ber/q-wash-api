@@ -124,3 +124,25 @@ func ResetPassword(ctx context.Context, repo *Repository, u *User) (string, erro
 	}
 	return plaintext, nil
 }
+
+// ProvisionAccount creates the missing staff or worker login for an
+// existing washing point (one that predates auto-provisioning, or whose
+// account was removed) and returns its one-time credential. Username
+// derivation matches ProvisionPointAccounts. role must be RoleStaff or
+// RoleWorker.
+func (r *Repository) ProvisionAccount(ctx context.Context, washingPointID uuid.UUID, role Role, pointName string) (Credential, error) {
+	base := slugify(pointName)
+	if role == RoleWorker {
+		base += "-worker"
+	}
+	var cred Credential
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		cred, err = newCredential(tx, washingPointID, role, base)
+		return err
+	})
+	if err != nil {
+		return Credential{}, err
+	}
+	return cred, nil
+}

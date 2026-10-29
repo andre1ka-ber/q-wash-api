@@ -2,6 +2,7 @@ package washingpoint
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -64,6 +65,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireManage ...func(http.Handle
 		wp.With(requireManage...).Delete("/{id}", h.deactivate)
 
 		wp.With(requireManage...).Get("/{id}/credentials", h.getCredentials)
+		wp.With(requireManage...).Post("/{id}/credentials/{role}", h.createCredentials)
 		wp.With(requireManage...).Post("/{id}/credentials/{role}/reset", h.resetCredentials)
 	})
 }
@@ -413,9 +415,25 @@ type credentialUsernameResponse struct {
 	Username string `json:"username"`
 }
 
+// A role without an account is null rather than failing the whole read, so a
+// client can offer to create just the missing one (createCredentials).
 type credentialsResponse struct {
-	Staff  credentialUsernameResponse `json:"staff"`
-	Worker credentialUsernameResponse `json:"worker"`
+	Staff  *credentialUsernameResponse `json:"staff"`
+	Worker *credentialUsernameResponse `json:"worker"`
+}
+
+// findCredentialUsername returns the point's login username for role, or nil
+// when the point has no such account.
+func (h *Handler) findCredentialUsername(ctx context.Context, id uuid.UUID, role user.Role) (*credentialUsernameResponse, error) {
+	u, err := h.userRepo.FindByWashingPointAndRole(ctx, id, role)
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) && appErr.Code == "user_not_found" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &credentialUsernameResponse{Username: *u.Username}, nil
 }
 
 // getCredentials returns the usernames (never passwords — those are only
@@ -439,21 +457,74 @@ func (h *Handler) getCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	staff, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleStaff)
+	staff, err := h.findCredentialUsername(r.Context(), id, user.RoleStaff)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	worker, err := h.userRepo.FindByWashingPointAndRole(r.Context(), id, user.RoleWorker)
+	worker, err := h.findCredentialUsername(r.Context(), id, user.RoleWorker)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
 	}
 
-	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{
-		Staff:  credentialUsernameResponse{Username: *staff.Username},
-		Worker: credentialUsernameResponse{Username: *worker.Username},
-	})
+	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{Staff: staff, Worker: worker})
+}
+
+// createCredentials provisions the staff or worker login a point is missing
+// (see credentialsResponse) and returns the new plaintext password once.
+// Same own-point-only restriction on staff as getCredentials; 409
+// credentials_exist if the account is already there (use reset instead).
+func (h *Handler) createCredentials(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := httputil.AuthUser(w, r)
+	if !ok {
+		return
+	}
+
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(id) {
+		httputil.WriteError(w, r, apperror.NotFound("washing_point_not_found", "washing point not found"))
+		return
+	}
+
+	var role user.Role
+	switch chi.URLParam(r, "role") {
+	case "staff":
+		role = user.RoleStaff
+	case "worker":
+		role = user.RoleWorker
+	default:
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_role", "role must be staff or worker"))
+		return
+	}
+
+	wp, err := h.repo.FindByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	existing, err := h.findCredentialUsername(r.Context(), id, role)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if existing != nil {
+		httputil.WriteError(w, r, apperror.Conflict("credentials_exist", "this account already exists; reset its password instead"))
+		return
+	}
+
+	cred, err := h.userRepo.ProvisionAccount(r.Context(), id, role, wp.Name)
+	if err != nil {
+		httputil.WriteError(w, r, apperror.Internal(err))
+		return
+	}
+	audit.Info(r, "credentials.created", "actor_id", authUser.ID.String(), "washing_point_id", id.String(), "role", string(role))
+
+	httputil.WriteJSON(w, http.StatusCreated, CredentialResponse{Username: cred.Username, Password: cred.Password})
 }
 
 // resetCredentials regenerates a single account's password (role is

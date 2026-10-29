@@ -165,6 +165,57 @@ func TestWashingPointCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("a point missing an account reads it as null and can have it created once", func(t *testing.T) {
+		created := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+			"name": "Legacy Wash", "address": "6 Test St", "latitude": 9.0, "longitude": 10.0,
+		})
+		wpID := created.str("id")
+		staffUsername, _ := credential(t, created.body, "credentials", "staff")["username"].(string)
+		if err := env.db.Where("washing_point_id = ? AND role = ?", wpID, user.RoleWorker).Delete(&user.User{}).Error; err != nil {
+			t.Fatalf("remove worker account: %v", err)
+		}
+
+		get := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/credentials", adminAccess, nil)
+		if get.status != http.StatusOK {
+			t.Fatalf("get with a missing worker: expected 200, got %d (%v)", get.status, get.body)
+		}
+		if get.body["worker"] != nil {
+			t.Errorf("expected worker to be null, got %v", get.body["worker"])
+		}
+		if got, _ := get.body["staff"].(map[string]any)["username"].(string); got != staffUsername {
+			t.Errorf("expected staff username %q, got %q", staffUsername, got)
+		}
+
+		if resp := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/credentials/staff", adminAccess, nil); resp.status != http.StatusConflict {
+			t.Errorf("expected 409 creating an account that exists, got %d (%v)", resp.status, resp.body)
+		}
+		if resp := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/credentials/owner", adminAccess, nil); resp.status != http.StatusBadRequest {
+			t.Errorf("expected 400 for an invalid role, got %d (%v)", resp.status, resp.body)
+		}
+
+		made := env.do(t, http.MethodPost, "/api/v1/washing-points/"+wpID+"/credentials/worker", adminAccess, nil)
+		if made.status != http.StatusCreated {
+			t.Fatalf("create worker: expected 201, got %d (%v)", made.status, made.body)
+		}
+		username, _ := made.body["username"].(string)
+		password, _ := made.body["password"].(string)
+		if username == "" || password == "" {
+			t.Fatalf("expected username+password, got %v", made.body)
+		}
+		login := env.do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"username": username, "password": password})
+		if login.status != http.StatusOK {
+			t.Fatalf("created worker login: expected 200, got %d (%v)", login.status, login.body)
+		}
+		if u, _ := login.body["user"].(map[string]any); u["role"] != "worker" || u["washing_point_id"] != wpID {
+			t.Errorf("expected role=worker washing_point_id=%s, got %v", wpID, u)
+		}
+
+		again := env.do(t, http.MethodGet, "/api/v1/washing-points/"+wpID+"/credentials", adminAccess, nil)
+		if again.body["worker"] == nil {
+			t.Error("expected worker to be present after creation")
+		}
+	})
+
 	t.Run("approving a connection request also provisions working credentials", func(t *testing.T) {
 		crCreated := env.do(t, http.MethodPost, "/api/v1/connection-requests", adminAccess, map[string]any{
 			"business_name": "Onboarded Wash Co", "contact_name": "Jane Doe",

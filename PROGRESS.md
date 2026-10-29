@@ -448,3 +448,9 @@ price per booking and count revenue/count per item per service. `queue.Repositor
 (`attachItems`, one batched query) and inserts them with the booking (`Create`). Price-option delete guard now reads
 `queue_items`. Seeds create items. Tests: integration `multi_service_booking_test.go`. Docs: `API.md`, `openapi.yaml`,
 `DATA_MODEL.md`. Deploy this before releasing clients that send `items`.
+
+- 2026-10-29 — Missing point accounts: `GET /washing-points/{id}/credentials` returns `null` for a role
+  with no account (was a 404 `user_not_found` for the whole response, which hid the other role too). New
+  `POST /washing-points/{id}/credentials/{role}` creates the missing staff/worker login (`user.Repository.ProvisionAccount`,
+  201 `{username, password}` once; 409 `credentials_exist`; audit `credentials.created`). Docs: `API.md`, `openapi.yaml`.
+  Integration test added to `TestWashingPointCredentials`. Clients must treat `staff`/`worker` as nullable.
