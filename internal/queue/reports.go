@@ -339,7 +339,11 @@ func summarizeReportRows(rows []Queue, priceByOption map[uuid.UUID]int64) (repor
 
 		total.cars++
 		total.revenueCents += price
-		total.bookedMinutes += minutes
+		// Overflow bookings are real washes (cars + revenue count) but occupy
+		// no numbered box, so they stay out of box utilization.
+		if !row.IsOverflow {
+			total.bookedMinutes += minutes
+		}
 
 		for _, it := range itemsOf(row) {
 			svc := byService[it.ServiceID]
@@ -351,6 +355,9 @@ func summarizeReportRows(rows []Queue, priceByOption map[uuid.UUID]int64) (repor
 			svc.revenueCents += priceByOption[it.PriceOptionID]
 		}
 
+		if row.IsOverflow {
+			continue
+		}
 		bx := byBox[row.BoxNumber]
 		if bx == nil {
 			bx = &reportAgg{}

@@ -168,6 +168,10 @@ func (m *Manager) NotifyStatus(ctx context.Context, q *queue.Queue) {
 // device (e.g. a walk-in who never installed the app) is silently skipped.
 // Tokens the provider reports dead are removed.
 func (m *Manager) NotifyStage(ctx context.Context, q *queue.Queue, kind Kind) error {
+	// Overflow bookings have no box to tell the customer about.
+	if q.IsOverflow {
+		return nil
+	}
 	tokens, err := m.deviceRepo.ListByUser(ctx, q.UserID)
 	if err != nil {
 		return err

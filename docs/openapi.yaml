@@ -923,6 +923,13 @@ paths:
         `manual`. 409 `slot_unavailable`, 409 `active_booking_exists`
         (client already has an active booking), 409 `phone_not_customer`
         (phone belongs to a staff/worker/admin account).
+
+        With `overflow: true` the booking goes into the point's virtual
+        out-of-queue box: `box_number` is ignored (stored as 0), no
+        box/capacity/overlap check applies and `scheduled_start_at` is only
+        the client's expected arrival (must still be inside operating
+        hours). Overflow bookings are never visible to customers or counted
+        in availability.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -934,13 +941,14 @@ paths:
                 items: { $ref: "#/components/schemas/BookingItemsInput" }
                 service_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
                 price_option_id: { type: string, format: uuid, description: "Legacy single-service form; ignored when `items` is sent." }
-                box_number: { type: integer, minimum: 1 }
+                box_number: { type: integer, minimum: 1, description: "Ignored when `overflow` is true." }
+                overflow: { type: boolean, default: false, description: "Book into the virtual out-of-queue box." }
                 scheduled_start_at: { type: string, format: date-time }
                 car_name: { type: string, maxLength: 255 }
                 plate: { type: string, maxLength: 32 }
                 client_phone: { type: string, example: "900000000", description: "E.164, or a local number (+992 is added)." }
                 client_name: { type: string, maxLength: 255 }
-              required: [box_number, scheduled_start_at, client_phone]
+              required: [scheduled_start_at, client_phone]
               description: Send `items` (or, for older clients, `service_id` + `price_option_id`).
       responses:
         "201":
@@ -953,6 +961,39 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/washing-points/{id}/queue/overflow-slots:
+    parameters:
+      - $ref: "#/components/parameters/washingPointId"
+    get:
+      tags: [Queue]
+      operationId: listOverflowSlots
+      summary: Full slot list for an overflow booking (staff)
+      description: >
+        Requires role `staff`, `worker`, or `admin` at this washing point.
+        Like `availability` but every slot of the day's operating windows is
+        returned whether or not it is taken (`available_boxes` is always
+        empty), since an overflow booking's time is only the client's
+        expected arrival.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: service_id, in: query, schema: { type: string, format: uuid } }
+        - { name: service_ids, in: query, schema: { type: string }, description: "Comma-separated distinct uuids." }
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AvailabilitySlot" } }
+                required: [items]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/washing-points/{id}/boxes/live:
     parameters:
@@ -2481,7 +2522,8 @@ components:
         id: { type: string, format: uuid }
         status: { type: string, enum: [queue, waiting, washing, ready, canceled, no_show] }
         ticket: { type: string, example: "A-11" }
-        box_number: { type: integer, minimum: 1 }
+        box_number: { type: integer, minimum: 0, description: "0 for overflow bookings." }
+        is_overflow: { type: boolean }
         scheduled_start_at: { type: string, format: date-time }
         scheduled_end_at: { type: string, format: date-time }
         paused_at: { type: string, format: date-time, nullable: true }

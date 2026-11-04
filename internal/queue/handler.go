@@ -71,6 +71,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 		board.With(requireQueueOps...).Get("/", h.listByWashingPoint)
 		board.With(requireQueueOps...).Get("/day", h.listDay)
 		board.With(requireQueueOps...).Post("/manual", h.createManual)
+		board.With(requireQueueOps...).Get("/overflow-slots", h.overflowSlots)
 	})
 
 	r.Route("/washing-points/{id}/boxes/live", func(live chi.Router) {
@@ -127,35 +128,9 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wp, err := h.wpRepo.FindByID(r.Context(), washingPointID)
+	wp, daySchedule, duration, err := h.daySlotInputs(r.Context(), washingPointID, serviceIDs, day)
 	if err != nil {
 		httputil.WriteError(w, r, err)
-		return
-	}
-
-	var totalMinutes int
-	for _, serviceID := range serviceIDs {
-		svc, err := h.serviceRepo.FindByID(r.Context(), serviceID)
-		if err != nil {
-			httputil.WriteError(w, r, err)
-			return
-		}
-		if svc.WashingPointID != washingPointID {
-			httputil.WriteError(w, r, apperror.BadRequest("service_not_at_washing_point", "service does not belong to this washing point"))
-			return
-		}
-		totalMinutes += svc.EffectiveQueueMinutes()
-	}
-
-	weekday := weekdayIndex(day.In(clock.BusinessLocation))
-	scheduleRow, err := h.scheduleRepo.FindByWeekday(r.Context(), washingPointID, weekday)
-	if err != nil {
-		httputil.WriteError(w, r, err)
-		return
-	}
-	daySchedule, err := resolveDaySchedule(day, scheduleRow)
-	if err != nil {
-		httputil.WriteError(w, r, apperror.Internal(err))
 		return
 	}
 
@@ -193,12 +168,79 @@ func (h *Handler) availability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	duration := time.Duration(totalMinutes) * time.Minute
 	slots := ComputeAvailableSlotsForDay(daySchedule, wp.BoxesCount, duration, busy)
 
 	items := make([]slotResponse, len(slots))
 	for i, s := range slots {
 		items[i] = slotResponse{Start: s.Start, End: s.End, AvailableBoxes: s.AvailableBoxes}
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// daySlotInputs resolves what slot computation needs for one point/day: the
+// point, its day schedule, and the slot length (sum of the services' queue
+// minutes). Shared by the public availability and the staff overflow slots.
+func (h *Handler) daySlotInputs(ctx context.Context, washingPointID uuid.UUID, serviceIDs []uuid.UUID, day time.Time) (*washingpoint.WashingPoint, DaySchedule, time.Duration, error) {
+	wp, err := h.wpRepo.FindByID(ctx, washingPointID)
+	if err != nil {
+		return nil, DaySchedule{}, 0, err
+	}
+
+	var totalMinutes int
+	for _, serviceID := range serviceIDs {
+		svc, err := h.serviceRepo.FindByID(ctx, serviceID)
+		if err != nil {
+			return nil, DaySchedule{}, 0, err
+		}
+		if svc.WashingPointID != washingPointID {
+			return nil, DaySchedule{}, 0, apperror.BadRequest("service_not_at_washing_point", "service does not belong to this washing point")
+		}
+		totalMinutes += svc.EffectiveQueueMinutes()
+	}
+
+	weekday := weekdayIndex(day.In(clock.BusinessLocation))
+	scheduleRow, err := h.scheduleRepo.FindByWeekday(ctx, washingPointID, weekday)
+	if err != nil {
+		return nil, DaySchedule{}, 0, err
+	}
+	daySchedule, err := resolveDaySchedule(day, scheduleRow)
+	if err != nil {
+		return nil, DaySchedule{}, 0, apperror.Internal(err)
+	}
+	return wp, daySchedule, time.Duration(totalMinutes) * time.Minute, nil
+}
+
+// overflowSlots is the cabinet's slot picker for an overflow booking: every
+// slot of the day's operating windows, taken or not, since an overflow
+// booking's time is only the client's expected arrival. Staff-only; never
+// reveals occupancy.
+func (h *Handler) overflowSlots(w http.ResponseWriter, r *http.Request) {
+	washingPointID, ok := ownWashingPointID(w, r)
+	if !ok {
+		return
+	}
+	serviceIDs, err := parseAvailabilityServiceIDs(r)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	day, err := dayFromQuery(r)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	_, daySchedule, duration, err := h.daySlotInputs(r.Context(), washingPointID, serviceIDs, day)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	// One virtual box and no busy intervals: every slot that fits the day
+	// schedule comes back.
+	slots := ComputeAvailableSlotsForDay(daySchedule, 1, duration, nil)
+	items := make([]slotResponse, len(slots))
+	for i, s := range slots {
+		items[i] = slotResponse{Start: s.Start, End: s.End, AvailableBoxes: []int{}}
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -298,6 +340,7 @@ type bookingResponse struct {
 	Items            []bookingItemResponse `json:"items"`
 	WashingPointID   string                `json:"washing_point_id"`
 	BoxNumber        int                   `json:"box_number"`
+	IsOverflow       bool                  `json:"is_overflow"`
 	ScheduledStartAt time.Time             `json:"scheduled_start_at"`
 	ScheduledEndAt   time.Time             `json:"scheduled_end_at"`
 	Notes            *string               `json:"notes,omitempty"`
@@ -334,6 +377,7 @@ func toBookingResponse(q *Queue) bookingResponse {
 		Items:            toBookingItems(q),
 		WashingPointID:   q.WashingPointID.String(),
 		BoxNumber:        q.BoxNumber,
+		IsOverflow:       q.IsOverflow,
 		ScheduledStartAt: q.ScheduledStartAt,
 		ScheduledEndAt:   q.ScheduledEndAt,
 		Notes:            q.Notes,
@@ -595,6 +639,7 @@ type boardItemResponse struct {
 	ID                 string     `json:"id"`
 	Status             string     `json:"status"`
 	BoxNumber          int        `json:"box_number"`
+	IsOverflow         bool       `json:"is_overflow"`
 	ScheduledStartAt   time.Time  `json:"scheduled_start_at"`
 	ScheduledEndAt     time.Time  `json:"scheduled_end_at"`
 	PausedAt           *time.Time `json:"paused_at,omitempty"`
@@ -664,7 +709,7 @@ func (h *Handler) listByWashingPoint(w http.ResponseWriter, r *http.Request) {
 	}
 	dayStart, dayEnd := clock.DayBounds(day)
 
-	rows, err := h.repo.ListLiveByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
+	rows, err := h.repo.ListLiveWithOverflowByWashingPointAndDate(r.Context(), washingPointID, dayStart, dayEnd)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -695,6 +740,7 @@ func (h *Handler) toBoardItems(ctx context.Context, rows []Queue) ([]boardItemRe
 			ID:                 row.ID.String(),
 			Status:             string(row.Status),
 			BoxNumber:          row.BoxNumber,
+			IsOverflow:         row.IsOverflow,
 			ScheduledStartAt:   row.ScheduledStartAt,
 			ScheduledEndAt:     row.ScheduledEndAt,
 			PausedAt:           row.PausedAt,

@@ -178,6 +178,11 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.BookingsToday++
 
+		// Overflow bookings occupy no box, so they don't count toward
+		// box utilization.
+		if q.IsOverflow {
+			continue
+		}
 		start, end := q.ScheduledStartAt, q.ScheduledEndAt
 		if start.Before(dayStart) {
 			start = dayStart

@@ -454,3 +454,12 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   `POST /washing-points/{id}/credentials/{role}` creates the missing staff/worker login (`user.Repository.ProvisionAccount`,
   201 `{username, password}` once; 409 `credentials_exist`; audit `credentials.created`). Docs: `API.md`, `openapi.yaml`.
   Integration test added to `TestWashingPointCredentials`. Clients must treat `staff`/`worker` as nullable.
+
+- 2026-11-04 — Overflow ("out of queue") box, backend. Migration `000030_queue_overflow` adds `queue.is_overflow`
+  (box_number 0 only for overflow; overlap `EXCLUDE` skips overflow rows). `POST .../queue/manual` accepts
+  `overflow: true` (no box/capacity check; operating hours and one-active-booking still apply). New staff-only
+  `GET .../queue/overflow-slots` returns the full slot list. Overflow rows are excluded from availability, `cars_ahead`,
+  public board, `boxes/live`, network `GET /queue` and box utilization (reports/admin stats); included in `queue/day`
+  and the point queue list (`is_overflow` flag on day/board/booking responses) and revenue. Stage notifications skipped.
+  Start/finish/pause/photos work in place; no move-to-box. Tests: integration `overflow_queue_test.go`. Docs:
+  `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `edge-cases.md`. Cabinet/worker UI + `q-wash-shared` pending (need design).

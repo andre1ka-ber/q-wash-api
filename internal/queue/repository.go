@@ -36,14 +36,14 @@ func (r *Repository) WithTx(tx *gorm.DB) *Repository {
 	return &Repository{db: tx}
 }
 
-// FindActiveBookingsInRange returns non-canceled, non-no-show bookings for
-// washingPointID whose interval overlaps [rangeStart, rangeEnd) — i.e.
+// FindActiveBookingsInRange returns non-canceled, non-no-show, non-overflow
+// bookings (overflow ones occupy no box) for washingPointID whose interval overlaps [rangeStart, rangeEnd) — i.e.
 // scheduled_start_at < rangeEnd AND scheduled_end_at > rangeStart, the
 // standard half-open interval overlap test.
 func (r *Repository) FindActiveBookingsInRange(ctx context.Context, washingPointID uuid.UUID, rangeStart, rangeEnd time.Time) ([]Queue, error) {
 	var rows []Queue
 	err := r.db.WithContext(ctx).
-		Where("washing_point_id = ? AND status NOT IN ? AND scheduled_start_at < ? AND scheduled_end_at > ?",
+		Where("washing_point_id = ? AND NOT is_overflow AND status NOT IN ? AND scheduled_start_at < ? AND scheduled_end_at > ?",
 			washingPointID, []Status{StatusCanceled, StatusNoShow}, rangeEnd, rangeStart).
 		Order("scheduled_start_at").
 		Find(&rows).Error
@@ -80,7 +80,7 @@ func (r *Repository) FindByWashingPointAndRange(ctx context.Context, washingPoin
 func (r *Repository) CountActiveAhead(ctx context.Context, washingPointID uuid.UUID, startAt time.Time) (int, error) {
 	var count int64
 	err := r.db.WithContext(ctx).Model(&Queue{}).
-		Where("washing_point_id = ? AND status IN ? AND scheduled_start_at < ?",
+		Where("washing_point_id = ? AND NOT is_overflow AND status IN ? AND scheduled_start_at < ?",
 			washingPointID, []Status{StatusQueue, StatusWaiting, StatusWashing}, startAt).
 		Count(&count).Error
 	if err != nil {
@@ -134,24 +134,36 @@ func (r *Repository) ListLiveByWashingPoint(ctx context.Context, washingPointID 
 // network-wide board (queue.Handler.list) has no date filter in the plan
 // and shouldn't gain one as a side effect of this change.
 func (r *Repository) ListLiveByWashingPointAndDate(ctx context.Context, washingPointID uuid.UUID, dayStart, dayEnd time.Time) ([]Queue, error) {
-	var rows []Queue
-	err := r.db.WithContext(ctx).
+	return r.listLiveByDate(ctx, washingPointID, dayStart, dayEnd, false)
+}
+
+// ListLiveWithOverflowByWashingPointAndDate is ListLiveByWashingPointAndDate
+// plus the point's overflow bookings — for the staff apps' queue only; the
+// public board and live boxes never include overflow.
+func (r *Repository) ListLiveWithOverflowByWashingPointAndDate(ctx context.Context, washingPointID uuid.UUID, dayStart, dayEnd time.Time) ([]Queue, error) {
+	return r.listLiveByDate(ctx, washingPointID, dayStart, dayEnd, true)
+}
+
+func (r *Repository) listLiveByDate(ctx context.Context, washingPointID uuid.UUID, dayStart, dayEnd time.Time, includeOverflow bool) ([]Queue, error) {
+	query := r.db.WithContext(ctx).
 		Where("washing_point_id = ? AND status IN ? AND scheduled_start_at >= ? AND scheduled_start_at < ?",
-			washingPointID, []Status{StatusQueue, StatusWaiting, StatusWashing}, dayStart, dayEnd).
-		Order("scheduled_start_at").
-		Find(&rows).Error
-	if err != nil {
+			washingPointID, []Status{StatusQueue, StatusWaiting, StatusWashing}, dayStart, dayEnd)
+	if !includeOverflow {
+		query = query.Where("NOT is_overflow")
+	}
+	var rows []Queue
+	if err := query.Order("scheduled_start_at").Find(&rows).Error; err != nil {
 		return nil, apperror.Internal(err)
 	}
 	return r.attachItems(ctx, rows)
 }
 
-// ListLive returns bookings still active in the physical queue
+// ListLive returns non-overflow bookings still active in the physical queue
 // (queue/waiting/washing), optionally scoped to one washing point.
 // washingPointID == nil means network-wide — callers must gate this to
 // admin (or a role-forced non-nil id) themselves; see queue.Handler.list.
 func (r *Repository) ListLive(ctx context.Context, washingPointID *uuid.UUID) ([]Queue, error) {
-	query := r.db.WithContext(ctx).Where("status IN ?", []Status{StatusQueue, StatusWaiting, StatusWashing})
+	query := r.db.WithContext(ctx).Where("NOT is_overflow AND status IN ?", []Status{StatusQueue, StatusWaiting, StatusWashing})
 	if washingPointID != nil {
 		query = query.Where("washing_point_id = ?", *washingPointID)
 	}

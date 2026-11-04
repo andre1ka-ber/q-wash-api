@@ -88,7 +88,11 @@ type bookingPlan struct {
 // customer bookings (start must be after now) and false for staff
 // walk-ins, which start "now" by definition. expectWashingPoint, when
 // non-nil, additionally requires the service to belong to that point.
-func (m *Manager) planBooking(ctx context.Context, items []BookingItem, boxNumber int, start time.Time, requireFuture bool, expectWashingPoint *uuid.UUID) (*bookingPlan, error) {
+//
+// overflow skips every box check (range, closed): an overflow booking sits
+// in the virtual out-of-queue box, not a numbered one. Operating hours and
+// service validation still apply.
+func (m *Manager) planBooking(ctx context.Context, items []BookingItem, boxNumber int, start time.Time, requireFuture, overflow bool, expectWashingPoint *uuid.UUID) (*bookingPlan, error) {
 	if len(items) == 0 {
 		return nil, apperror.BadRequest("invalid_items", "at least one service is required")
 	}
@@ -144,15 +148,17 @@ func (m *Manager) planBooking(ctx context.Context, items []BookingItem, boxNumbe
 		return nil, apperror.BadRequest("washing_point_inactive", "washing point is not currently available")
 	}
 
-	if boxNumber < 1 || boxNumber > wp.BoxesCount {
-		return nil, apperror.BadRequest("invalid_box_number", fmt.Sprintf("box_number must be between 1 and %d", wp.BoxesCount))
-	}
-	requestedBox, err := m.boxRepo.FindByNumber(ctx, wp.ID, boxNumber)
-	if err != nil {
-		return nil, err
-	}
-	if requestedBox != nil && !requestedBox.IsOpen {
-		return nil, apperror.Conflict("box_closed", "the requested box is currently closed")
+	if !overflow {
+		if boxNumber < 1 || boxNumber > wp.BoxesCount {
+			return nil, apperror.BadRequest("invalid_box_number", fmt.Sprintf("box_number must be between 1 and %d", wp.BoxesCount))
+		}
+		requestedBox, err := m.boxRepo.FindByNumber(ctx, wp.ID, boxNumber)
+		if err != nil {
+			return nil, err
+		}
+		if requestedBox != nil && !requestedBox.IsOpen {
+			return nil, apperror.Conflict("box_closed", "the requested box is currently closed")
+		}
 	}
 
 	if requireFuture && !start.After(time.Now()) {
@@ -197,8 +203,10 @@ func (m *Manager) insertLocked(ctx context.Context, plan *bookingPlan, q *Queue,
 		if err != nil {
 			return err
 		}
-		if err := verifyBoxAvailable(q.BoxNumber, q.ScheduledStartAt, q.ScheduledEndAt, busy); err != nil {
-			return err
+		if !q.IsOverflow {
+			if err := verifyBoxAvailable(q.BoxNumber, q.ScheduledStartAt, q.ScheduledEndAt, busy); err != nil {
+				return err
+			}
 		}
 		if beforeInsert != nil {
 			if err := beforeInsert(tx, q); err != nil {
@@ -230,7 +238,7 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, apperror.Conflict("active_booking_exists", "you already have an active booking")
 	}
 
-	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, true, nil)
+	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, true, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -257,9 +265,13 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 }
 
 type CreateManualBookingInput struct {
-	WashingPointID   uuid.UUID
-	Items            []BookingItem
-	BoxNumber        int
+	WashingPointID uuid.UUID
+	Items          []BookingItem
+	BoxNumber      int
+	// Overflow books into the point's virtual out-of-queue box instead of
+	// BoxNumber (ignored when set); ScheduledStartAt is then only the
+	// client's expected arrival and no capacity/conflict check applies.
+	Overflow         bool
 	ScheduledStartAt time.Time
 	CarName          string
 	Plate            string
@@ -275,20 +287,27 @@ type CreateManualBookingInput struct {
 // (matched by plate, else by name) instead of always creating a new one. An
 // existing account with a non-customer role (staff/worker/admin) is
 // rejected rather than booked against. Always starts in StatusQueue.
+// With in.Overflow the booking goes into the virtual out-of-queue box
+// (BoxNumber 0, IsOverflow) and skips box availability checks.
 func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookingInput) (*Queue, error) {
-	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, false, &in.WashingPointID)
+	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, false, in.Overflow, &in.WashingPointID)
 	if err != nil {
 		return nil, err
 	}
 
+	boxNumber := in.BoxNumber
+	if in.Overflow {
+		boxNumber = 0
+	}
 	q := &Queue{
 		Status:           StatusQueue,
 		Source:           SourceManual,
+		IsOverflow:       in.Overflow,
 		ServiceID:        plan.items[0].ServiceID,
 		PriceOptionID:    plan.items[0].PriceOptionID,
 		Items:            plan.items,
 		WashingPointID:   plan.wp.ID,
-		BoxNumber:        in.BoxNumber,
+		BoxNumber:        boxNumber,
 		ScheduledStartAt: in.ScheduledStartAt,
 		ScheduledEndAt:   plan.end,
 	}

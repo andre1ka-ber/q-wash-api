@@ -24,6 +24,7 @@ type dayItemResponse struct {
 	Status           string     `json:"status"`
 	Ticket           string     `json:"ticket"`
 	BoxNumber        int        `json:"box_number"`
+	IsOverflow       bool       `json:"is_overflow"`
 	ScheduledStartAt time.Time  `json:"scheduled_start_at"`
 	ScheduledEndAt   time.Time  `json:"scheduled_end_at"`
 	PausedAt         *time.Time `json:"paused_at,omitempty"`
@@ -85,7 +86,13 @@ func (h *Handler) listDay(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// overflowTicketPrefix labels tickets of the virtual out-of-queue box.
+const overflowTicketPrefix = "O-"
+
 func ticketPrefix(box int) string {
+	if box == 0 {
+		return overflowTicketPrefix
+	}
 	return string(rune('A'+(box-1)%26)) + "-"
 }
 
@@ -138,6 +145,7 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 			Status:           string(row.Status),
 			Ticket:           ticketByID[row.ID],
 			BoxNumber:        row.BoxNumber,
+			IsOverflow:       row.IsOverflow,
 			ScheduledStartAt: row.ScheduledStartAt,
 			ScheduledEndAt:   row.ScheduledEndAt,
 			PausedAt:         row.PausedAt,
@@ -174,15 +182,19 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 }
 
 type createManualBookingRequest struct {
-	ServiceID        string               `json:"service_id"`
-	PriceOptionID    string               `json:"price_option_id"`
-	Items            []bookingItemRequest `json:"items"`
-	BoxNumber        int                  `json:"box_number"`
-	ScheduledStartAt string               `json:"scheduled_start_at"`
-	CarName          string               `json:"car_name"`
-	Plate            string               `json:"plate"`
-	ClientPhone      string               `json:"client_phone"`
-	ClientName       string               `json:"client_name"`
+	ServiceID     string               `json:"service_id"`
+	PriceOptionID string               `json:"price_option_id"`
+	Items         []bookingItemRequest `json:"items"`
+	BoxNumber     int                  `json:"box_number"`
+	// Overflow books into the point's virtual out-of-queue box: box_number is
+	// ignored, scheduled_start_at is only the expected arrival, and no
+	// capacity/conflict check applies.
+	Overflow         bool   `json:"overflow"`
+	ScheduledStartAt string `json:"scheduled_start_at"`
+	CarName          string `json:"car_name"`
+	Plate            string `json:"plate"`
+	ClientPhone      string `json:"client_phone"`
+	ClientName       string `json:"client_name"`
 }
 
 // createManual is the cabinet's "Добавить вручную" (staff/worker/admin at
@@ -235,6 +247,7 @@ func (h *Handler) createManual(w http.ResponseWriter, r *http.Request) {
 		WashingPointID:   washingPointID,
 		Items:            bookingItems,
 		BoxNumber:        req.BoxNumber,
+		Overflow:         req.Overflow,
 		ScheduledStartAt: start,
 		CarName:          carName,
 		Plate:            plate,

@@ -36,15 +36,21 @@ type Queue struct {
 	Status Status    `gorm:"type:varchar(16);not null;default:queue"`
 	UserID uuid.UUID `gorm:"type:uuid;not null;index"`
 	// CarID is nil for walk-in bookings added by staff without any car data.
-	CarID            *uuid.UUID `gorm:"type:uuid"`
-	ServiceID        uuid.UUID  `gorm:"type:uuid;not null"`
-	PriceOptionID    uuid.UUID  `gorm:"type:uuid;not null"`
-	WashingPointID   uuid.UUID  `gorm:"type:uuid;not null;index"`
-	BoxNumber        int        `gorm:"not null"`
-	ScheduledStartAt time.Time  `gorm:"not null"`
-	ScheduledEndAt   time.Time  `gorm:"not null"`
-	Notes            *string    `gorm:"type:text"`
-	Source           Source     `gorm:"type:varchar(8);not null;default:app"`
+	CarID          *uuid.UUID `gorm:"type:uuid"`
+	ServiceID      uuid.UUID  `gorm:"type:uuid;not null"`
+	PriceOptionID  uuid.UUID  `gorm:"type:uuid;not null"`
+	WashingPointID uuid.UUID  `gorm:"type:uuid;not null;index"`
+	// BoxNumber is 0 for overflow bookings (see IsOverflow).
+	BoxNumber int `gorm:"not null"`
+	// IsOverflow marks a staff-created booking in the point's virtual
+	// "out of queue" box: it ignores box capacity and conflicts (its
+	// scheduled time is only the client's expected arrival), is never
+	// visible to customers or availability math, and has BoxNumber 0.
+	IsOverflow       bool      `gorm:"not null;default:false"`
+	ScheduledStartAt time.Time `gorm:"not null"`
+	ScheduledEndAt   time.Time `gorm:"not null"`
+	Notes            *string   `gorm:"type:text"`
+	Source           Source    `gorm:"type:varchar(8);not null;default:app"`
 	CanceledAt       *time.Time
 	// PausedAt is only meaningful while Status is StatusWashing — toggled
 	// by the worker app's pause/resume actions (PATCH .../pause and .../resume,
