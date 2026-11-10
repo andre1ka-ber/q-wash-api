@@ -57,6 +57,9 @@ type PayomConfig struct {
 	// individual accounts; the template must use a "code" variable).
 	// Empty sends free text (legal entities only).
 	OTPTemplateID string
+	// OTPCodeVariable is the template variable name that receives the code.
+	// Empty means "code". Payom's dashboard may force names like "code-1".
+	OTPCodeVariable string
 }
 
 // NewOTPSender returns the OTP sender for the configured provider: "payom"

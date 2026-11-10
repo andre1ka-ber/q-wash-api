@@ -67,9 +67,13 @@ func (p *PayomSender) SendOTP(ctx context.Context, phoneNumber, code string, ttl
 
 	req := payomRequest{Telephone: phoneNumber, SenderName: p.cfg.SenderName, Type: "SMS"}
 	if p.cfg.OTPTemplateID != "" {
+		varName := p.cfg.OTPCodeVariable
+		if varName == "" {
+			varName = "code"
+		}
 		req.TemplateMessage = &payomTemplate{
 			TemplateID: p.cfg.OTPTemplateID,
-			Variables:  map[string]any{"code": code},
+			Variables:  map[string]any{varName: code},
 		}
 	} else {
 		req.Text = OTPMessage(code, ttl)

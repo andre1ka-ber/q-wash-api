@@ -81,6 +81,28 @@ func TestPayomSendOTP_Template(t *testing.T) {
 	}
 }
 
+func TestPayomSendOTP_CustomCodeVariable(t *testing.T) {
+	var got struct {
+		TemplateMessage struct {
+			Variables map[string]any `json:"variables"`
+		} `json:"templateMessage"`
+	}
+	p := newTestPayom(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+	}, func(c *PayomConfig) {
+		c.OTPTemplateID = "11111111-2222-3333-4444-555555555555"
+		c.OTPCodeVariable = "code-1"
+	})
+
+	if err := p.SendOTP(context.Background(), testPhone, "654321", 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if got.TemplateMessage.Variables["code-1"] != "654321" || len(got.TemplateMessage.Variables) != 1 {
+		t.Errorf("variables = %v", got.TemplateMessage.Variables)
+	}
+}
+
 func TestPayomSendOTP_Errors(t *testing.T) {
 	cases := []struct {
 		name   string

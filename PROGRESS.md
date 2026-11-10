@@ -400,6 +400,17 @@ See `docs/PLAN.md` for phase descriptions, `docs/DATA_MODEL.md` for schema, `doc
   `go vet`, `go test ./...` and `go test -tags=integration` clean. NOT yet
   tried against the real Payom API — no account/credentials yet.
 
+- 2026-11-10 — **Payom template variable name configurable**: first real
+  run showed individual accounts must send by template (free text → 422), and
+  the Payom dashboard forces the variable name `code-1`, not `code`. New
+  `PAYOM_OTP_CODE_VARIABLE` (default `code`, so existing setups are unchanged)
+  sets the key used in `templateMessage.variables`; wired through
+  `config.SMSConfig.PayomOTPCodeVar` → `sms.PayomConfig.OTPCodeVariable`.
+  Test: `TestPayomSendOTP_CustomCodeVariable`. Also learned: `PAYOM_BASE_URL`
+  must be the bare account host (the code appends `/api/message`; a path in
+  the base URL gives a 404). Production needs `PAYOM_OTP_TEMPLATE_ID` and
+  `PAYOM_OTP_CODE_VARIABLE=code-1`.
+
 ## Public connection-request form (2026-10-10)
 
 `POST /connection-requests/apply` — unauthenticated twin of the admin create,

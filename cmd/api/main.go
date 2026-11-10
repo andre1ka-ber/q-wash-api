@@ -78,10 +78,11 @@ func run() error {
 	}
 
 	otpSender, err := sms.NewOTPSender(cfg.SMS.Provider, sms.PayomConfig{
-		BaseURL:       cfg.SMS.PayomBaseURL,
-		Token:         cfg.SMS.PayomToken,
-		SenderName:    cfg.SMS.PayomSenderName,
-		OTPTemplateID: cfg.SMS.PayomOTPTemplateID,
+		BaseURL:         cfg.SMS.PayomBaseURL,
+		Token:           cfg.SMS.PayomToken,
+		SenderName:      cfg.SMS.PayomSenderName,
+		OTPTemplateID:   cfg.SMS.PayomOTPTemplateID,
+		OTPCodeVariable: cfg.SMS.PayomOTPCodeVar,
 	})
 	if err != nil {
 		return err

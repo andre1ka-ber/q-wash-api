@@ -125,6 +125,7 @@ type SMSConfig struct {
 	PayomToken         string
 	PayomSenderName    string
 	PayomOTPTemplateID string
+	PayomOTPCodeVar    string
 }
 
 // MonitoringConfig configures Sentry error reporting. Empty DSN means
@@ -264,6 +265,7 @@ func Load() (Config, error) {
 			PayomToken:         getEnv("PAYOM_API_TOKEN", ""),
 			PayomSenderName:    getEnv("PAYOM_SENDER_NAME", "QWash"),
 			PayomOTPTemplateID: getEnv("PAYOM_OTP_TEMPLATE_ID", ""),
+			PayomOTPCodeVar:    getEnv("PAYOM_OTP_CODE_VARIABLE", "code"),
 		},
 		Monitoring: MonitoringConfig{DSN: getEnv("SENTRY_DSN", "")},
 	}
