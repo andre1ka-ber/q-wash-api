@@ -138,7 +138,7 @@ func toResponse(wp *WashingPoint) response {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	points, err := h.repo.List(r.Context())
+	points, err := h.repo.ListPublic(r.Context())
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return

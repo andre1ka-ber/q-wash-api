@@ -361,3 +361,46 @@ func TestQueue_GetOwnershipAndHistoryPagination(t *testing.T) {
 		}
 	})
 }
+
+func TestWashingPoints_PublicListHidesPendingReview(t *testing.T) {
+	env := newTestEnv(t)
+	adminAccess := env.loginAs(t, uniquePhone(310), user.RoleAdmin)
+
+	create := func(name, status string) string {
+		r := env.do(t, http.MethodPost, "/api/v1/washing-points", adminAccess, map[string]any{
+			"name": name, "address": "1 Test St", "latitude": 1.0, "longitude": 2.0,
+			"boxes_count": 1, "status": status,
+		})
+		if r.status != http.StatusCreated {
+			t.Fatalf("create %s: %d (%v)", name, r.status, r.body)
+		}
+		return r.str("id")
+	}
+	activeID := create("Visible Active", "active")
+	pausedID := create("Visible Paused", "paused")
+	pendingID := create("Hidden Pending", "pending_review")
+
+	has := func(list []map[string]any, id string) bool {
+		for _, it := range list {
+			if it["id"] == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	pub := env.do(t, http.MethodGet, "/api/v1/washing-points", "", nil)
+	if pub.status != http.StatusOK {
+		t.Fatalf("public list: %d", pub.status)
+	}
+	got := items(t, pub)
+	if !has(got, activeID) || !has(got, pausedID) || has(got, pendingID) {
+		t.Errorf("public list: active=%v paused=%v pending=%v (want true,true,false)",
+			has(got, activeID), has(got, pausedID), has(got, pendingID))
+	}
+
+	adm := env.do(t, http.MethodGet, "/api/v1/admin/washing-points", adminAccess, nil)
+	if adm.status != http.StatusOK || !has(items(t, adm), pendingID) {
+		t.Errorf("admin list must still include the pending point (status %d)", adm.status)
+	}
+}

@@ -474,3 +474,10 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   and the point queue list (`is_overflow` flag on day/board/booking responses) and revenue. Stage notifications skipped.
   Start/finish/pause/photos work in place; no move-to-box. Tests: integration `overflow_queue_test.go`. Docs:
   `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `edge-cases.md`. Cabinet/worker UI + `q-wash-shared` pending (need design).
+
+- 2026-11-11 — Public `GET /washing-points` hides `pending_review` points (customer apps must not list points
+  that are still being set up). No new status, no migration: reuses the existing `pending_review`. New
+  `washingpoint.Repository.ListPublic` (`status <> 'pending_review'`) used only by the public list handler;
+  `/admin/washing-points` and admin stats keep the unfiltered `List`. `paused` points are still listed.
+  Not hidden by ID: `GET /washing-points/{id}` and its photos/services/schedule still resolve for a pending point.
+  Docs: `API.md`, `openapi.yaml`. Test: integration `TestWashingPoints_PublicListHidesPendingReview`.

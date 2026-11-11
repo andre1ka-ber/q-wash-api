@@ -27,6 +27,20 @@ func (r *Repository) List(ctx context.Context) ([]WashingPoint, error) {
 	return points, nil
 }
 
+// ListPublic is List without points still awaiting setup/review
+// (StatusPendingReview) — what customer-facing clients may show. Staff and
+// admin views keep using List.
+func (r *Repository) ListPublic(ctx context.Context) ([]WashingPoint, error) {
+	var points []WashingPoint
+	err := r.db.WithContext(ctx).
+		Where("status <> ?", StatusPendingReview).
+		Order("name").Find(&points).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return points, nil
+}
+
 // CountByStatus returns the network-wide point count grouped by status,
 // for the admin dashboard (internal/admin) — zero entries for a status
 // with no points, rather than a missing map key.

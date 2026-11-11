@@ -297,7 +297,10 @@ paths:
       tags: [Washing points]
       operationId: listWashingPoints
       summary: List washing points
-      description: Public. Returns points of any status, ordered by name.
+      description: >
+        Public. Returns points with status `active` or `paused`, ordered by
+        name. Points in `pending_review` are not listed (they are still being
+        set up); admins see them via `GET /admin/washing-points`.
       responses:
         "200":
           description: OK
