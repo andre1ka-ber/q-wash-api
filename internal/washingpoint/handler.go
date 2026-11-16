@@ -83,6 +83,8 @@ type response struct {
 	Status      string   `json:"status"`
 	Description *string  `json:"description,omitempty"`
 	Amenities   []string `json:"amenities,omitempty"`
+	// RequireConfirmation: online bookings wait for staff confirmation.
+	RequireConfirmation bool `json:"require_confirmation"`
 }
 
 // CredentialResponse/AccountsResponse are exported so connectionrequest's
@@ -134,6 +136,8 @@ func toResponse(wp *WashingPoint) response {
 		Status:      string(wp.Status),
 		Description: wp.Description,
 		Amenities:   []string(wp.Amenities),
+
+		RequireConfirmation: wp.RequireConfirmation,
 	}
 }
 
@@ -176,6 +180,8 @@ type createRequest struct {
 	Status      *string  `json:"status"`
 	Description *string  `json:"description"`
 	Amenities   []string `json:"amenities"`
+
+	RequireConfirmation *bool `json:"require_confirmation"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +256,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Amenities:   req.Amenities,
 	}
+	if req.RequireConfirmation != nil {
+		wp.RequireConfirmation = *req.RequireConfirmation
+	}
 	accounts, err := h.repo.CreateWithAccounts(r.Context(), wp)
 	if err != nil {
 		httputil.WriteError(w, r, err)
@@ -288,6 +297,8 @@ type updateRequest struct {
 	Status      *string   `json:"status"`
 	Description *string   `json:"description"`
 	Amenities   *[]string `json:"amenities"`
+
+	RequireConfirmation *bool `json:"require_confirmation"`
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +381,9 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Amenities != nil {
 		wp.Amenities = *req.Amenities
+	}
+	if req.RequireConfirmation != nil {
+		wp.RequireConfirmation = *req.RequireConfirmation
 	}
 
 	if err := validate(wp.Name, wp.Address, wp.Latitude, wp.Longitude, wp.BoxesCount, wp.OpenTime, wp.CloseTime); err != nil {

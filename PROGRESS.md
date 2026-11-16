@@ -481,3 +481,11 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   `/admin/washing-points` and admin stats keep the unfiltered `List`. `paused` points are still listed.
   Not hidden by ID: `GET /washing-points/{id}` and its photos/services/schedule still resolve for a pending point.
   Docs: `API.md`, `openapi.yaml`. Test: integration `TestWashingPoints_PublicListHidesPendingReview`.
+
+- 2026-11-16 — Manual booking confirmation, backend. Migration `000031_booking_confirmation`: `washing_points.require_confirmation`
+  (default false), `queue.status` gains `pending` (CHECK + `queue_one_active_booking_per_user` rebuilt to include it; the
+  overlap `EXCLUDE` already holds the slot). `POST /queue` books `pending` when the point requires confirmation (walk-ins never).
+  New `PATCH /queue/{id}/confirm|reject` (staff/admin, own point, 409 `not_pending`); customer cancel allowed from `pending`.
+  Pending is excluded from live boards/`cars_ahead`/reminders, included in `queue/day`. Pushes `booking_confirmed`/`booking_rejected`.
+  Tests: integration `booking_confirmation_test.go`. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `db-schema.md`/`edge-cases.md`.
+  Cabinet / mobile / `q-wash-shared` pending (platform `plan-booking-confirmation.md`).

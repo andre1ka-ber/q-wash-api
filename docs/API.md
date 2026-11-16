@@ -272,7 +272,9 @@ everything marked `staff, worker, admin` below and nothing marked plainly
 | POST | `/queue` | any authenticated | body: `{car_id, items: [{service_id, price_option_id}, ...], box_number, scheduled_start_at, notes?}` (1–8 distinct services of one washing point; the booking blocks the box for the sum of their queue minutes; the legacy single `service_id` + `price_option_id` pair is still accepted and means one item). Responses carry `items` too; `service_id`/`price_option_id` mirror the first one. `box_number` is client-chosen (see the washing point's `boxes_count` and the availability endpoint's `available_boxes`) — the server validates it, never auto-assigns. `scheduled_start_at` is RFC3339 and must be in the future. `washing_point_id` is *not* in the body — derived from `service_id`. Not role-restricted to "customer": any authenticated user (including staff) can book for themselves, matching how cars are ownership- not role-scoped. A user may have at most one active (`queue`/`waiting`/`washing`) booking at a time — 409 `active_booking_exists` otherwise; cancel or wait for it to complete first. |
 | GET | `/queue/{id}` | owner, staff, admin | detail; anyone else 404s `queue_not_found` (never 403 — doesn't confirm the id exists). For staff, "anyone else" includes another washing point's staff — scoped to the booking's own point, same as every other staff-gated queue endpoint below. |
 | GET | `/queue/{id}/events` | owner | `text/event-stream`. Pushes the booking (same shape as `GET /queue/{id}`) immediately, then again whenever anything changes for its washing point (a booking created/canceled/advanced there), until the booking reaches `ready`/`canceled` or the client disconnects. A `: ping` comment is sent every 25s to keep the connection alive through proxies. Same ownership rule as `GET /queue/{id}` (404, not 403, for a non-owner). |
-| PATCH | `/queue/{id}/cancel` | owner, **staff, worker, admin** | only while status is `queue`/`waiting`; 409 `cannot_cancel` otherwise, including re-canceling. As of phase 7, not owner-only any more — staff/worker/admin at the booking's own washing point may also cancel it (the worker app's "Снять" no-show action), scoped the same way every other staff-gated queue endpoint is (404 `queue_not_found`, not 403, for a different point's staff). |
+| PATCH | `/queue/{id}/cancel` | owner, **staff, worker, admin** | only while status is `pending`/`queue`/`waiting`; 409 `cannot_cancel` otherwise, including re-canceling. As of phase 7, not owner-only any more — staff/worker/admin at the booking's own washing point may also cancel it (the worker app's "Снять" no-show action), scoped the same way every other staff-gated queue endpoint is (404 `queue_not_found`, not 403, for a different point's staff). |
+| PATCH | `/queue/{id}/confirm` | staff, admin | Confirms a `pending` booking (online booking at a point with `require_confirmation`) → `queue`; pushes the customer `booking_confirmed`. Own point only (404 `queue_not_found` otherwise); 409 `not_pending` for any other status, 409 `status_changed` if it changed concurrently. |
+| PATCH | `/queue/{id}/reject` | staff, admin | Same access/errors; cancels a `pending` booking (status `canceled`, slot freed) and pushes `booking_rejected`. |
 | PATCH | `/queue/{id}/status` | staff, worker, admin | body: `{status}`, one of `queue`/`waiting`/`washing`/`ready`/`no_show` (never `canceled` — that's `/cancel`; 400 `invalid_status` otherwise). Forward one step at a time, plus `no_show` from `queue`/`waiting`, plus `queue` to restore a `no_show`/`canceled` booking (409 `slot_unavailable` if its slot was taken, 409 `active_booking_exists` if the customer has another active booking). 409 `invalid_status_transition` on anything else, including any move from `ready`. 409 `status_changed` if the booking was changed by someone else between the read and the write (e.g. a customer cancel racing a worker's start): reload and retry — the same applies to `/cancel`, `/pause` and `/resume`. Scoped to the caller's own washing point — 404 `queue_not_found` otherwise. |
 | PATCH | `/queue/{id}/pause` | staff, worker, admin | toggles `paused_at` to now, without moving `status`. Only while `status = washing` — 409 `cannot_pause` if not washing or already paused. Same own-point scoping as `/status`. |
 | PATCH | `/queue/{id}/resume` | staff, worker, admin | clears `paused_at`. Only while `status = washing` **and** currently paused — 409 `cannot_resume` otherwise. Same own-point scoping as `/status`. |
@@ -423,6 +425,17 @@ are always forced to their own point regardless of the query param.
 
 Validation: 400 `invalid_user_id`/`invalid_queue_id` (uuid parse), `invalid_text` (empty or >2000 chars), `invalid_send_at` (not RFC3339), `queue_user_mismatch` (`queue_id` doesn't belong to `user_id`); 404 `user_not_found`/`queue_not_found`.
 
+### Manual booking confirmation — implemented
+
+`washing_points.require_confirmation` (bool, default `false`; returned by every washing-point response, settable via `POST`/`PATCH /washing-points` by the point's staff or admin). When `true`, `POST /queue` creates the booking as `status: "pending"` instead of `queue`; staff-created walk-ins (`POST .../queue/manual`, incl. overflow) are never pending. A `pending` booking:
+
+- **holds its box slot** (the overlap `EXCLUDE` only exempts `canceled`/`no_show`) and counts as the customer's one active booking (`active_booking_exists`);
+- is listed in `GET .../queue/day` (cabinet) but **not** in `GET /queue`, `GET .../queue`, `.../board`, `.../boxes/live`, and not in `cars_ahead`; no reminder/late pushes;
+- is left only via `PATCH /queue/{id}/confirm` (→ `queue`), `PATCH /queue/{id}/reject` (→ `canceled`) or the customer's own `/cancel`; `PATCH /queue/{id}/status` never touches it (409 `invalid_status_transition`);
+- has no timeout — it stays pending until staff or the customer act. Turning the setting off does not touch existing pending bookings.
+
+A rejected booking is stored as `canceled`; only the push distinguishes it. Push kinds `booking_confirmed` («Запись подтверждена») and `booking_rejected` («Запись отклонена») use the same `data` shape as the stage pushes below, sent at most once per booking.
+
 ### Push notifications for booking stages — implemented
 
 The customer app receives a Firebase Cloud Messaging push at each stage of a booking. The app registers its FCM token; the API sends to every token the booking's owner has registered.
@@ -432,7 +445,7 @@ The customer app receives a Firebase Cloud Messaging push at each stage of a boo
 | PUT | `/me/devices` | any authenticated | body `{token, platform}` (`platform`: `android`\|`ios`). Idempotent upsert: a token already registered (same phone again, or another account signing in on it) is moved to the caller. 204. 400 `invalid_token` (blank / >4096 chars), `invalid_platform`. |
 | DELETE | `/me/devices/{token}` | any authenticated | Removes the caller's own token (call on logout). 204 even if unknown or not the caller's (idempotent; never removes someone else's). |
 
-Stages (each sent **at most once per booking**, recorded in `notifications` with `channel: "push"`):
+Stages (plus `booking_confirmed`/`booking_rejected`, see above; each sent **at most once per booking**, recorded in `notifications` with `channel: "push"`):
 
 | kind | when | text (Russian) |
 |---|---|---|

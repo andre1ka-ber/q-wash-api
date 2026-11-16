@@ -43,6 +43,9 @@ type Manager struct {
 // Implementations must not block or fail the status change.
 type StageNotifier interface {
 	NotifyStatus(ctx context.Context, q *Queue)
+	// NotifyDecision tells the customer whether staff confirmed or
+	// rejected their pending booking.
+	NotifyDecision(ctx context.Context, q *Queue, confirmed bool)
 }
 
 // SetStageNotifier wires the optional notifier; without one, status changes
@@ -243,8 +246,12 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, err
 	}
 
+	status := StatusQueue
+	if plan.wp.RequireConfirmation {
+		status = StatusPending
+	}
 	q := &Queue{
-		Status:           StatusQueue,
+		Status:           status,
 		Source:           SourceApp,
 		UserID:           in.UserID,
 		CarID:            &in.CarID,
@@ -380,7 +387,7 @@ func (m *Manager) CancelBooking(ctx context.Context, id uuid.UUID) (*Queue, erro
 	if err != nil {
 		return nil, err
 	}
-	if q.Status != StatusQueue && q.Status != StatusWaiting {
+	if q.Status != StatusPending && q.Status != StatusQueue && q.Status != StatusWaiting {
 		return nil, apperror.Conflict("cannot_cancel", "booking can only be canceled before washing starts")
 	}
 
@@ -392,6 +399,46 @@ func (m *Manager) CancelBooking(ctx context.Context, id uuid.UUID) (*Queue, erro
 		return nil, err
 	}
 	m.bus.Publish(q.WashingPointID)
+	return q, nil
+}
+
+// ConfirmBooking moves a pending booking to queue; RejectBooking cancels it.
+// Who may call these (staff/admin of the booking's point) is decided by the
+// caller (queue.Handler.confirm/reject), same layering as CancelBooking.
+// Both 409 not_pending for any other status, and the customer is pushed the
+// decision (best-effort).
+func (m *Manager) ConfirmBooking(ctx context.Context, id uuid.UUID) (*Queue, error) {
+	return m.decide(ctx, id, true)
+}
+
+func (m *Manager) RejectBooking(ctx context.Context, id uuid.UUID) (*Queue, error) {
+	return m.decide(ctx, id, false)
+}
+
+func (m *Manager) decide(ctx context.Context, id uuid.UUID, confirm bool) (*Queue, error) {
+	q, err := m.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if q.Status != StatusPending {
+		return nil, apperror.Conflict("not_pending", "booking is not awaiting confirmation")
+	}
+	if confirm {
+		q.Status = StatusQueue
+	} else {
+		now := time.Now()
+		q.Status = StatusCanceled
+		q.CanceledAt = &now
+	}
+	// from=pending makes a racing customer cancel / second decision lose with
+	// 409 status_changed instead of overwriting the other.
+	if err := m.repo.UpdateStatus(ctx, q, StatusPending); err != nil {
+		return nil, err
+	}
+	m.bus.Publish(q.WashingPointID)
+	if m.notifier != nil {
+		m.notifier.NotifyDecision(ctx, q, confirm)
+	}
 	return q, nil
 }
 
@@ -438,7 +485,8 @@ func (m *Manager) Resume(ctx context.Context, id uuid.UUID) (*Queue, error) {
 	return q, nil
 }
 
-// staffStatusTransitions is the staff-driven state machine: forward one
+// staffStatusTransitions is the staff-driven state machine (pending is not
+// part of it: use ConfirmBooking/RejectBooking): forward one
 // step at a time (queue -> waiting -> washing -> ready), plus no_show from
 // queue/waiting, plus restoring a no_show or canceled booking to queue
 // (the cabinet's "Вернуть в очередь" — re-checked against the box's

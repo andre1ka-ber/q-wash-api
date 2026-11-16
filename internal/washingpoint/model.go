@@ -30,6 +30,10 @@ type WashingPoint struct {
 	OpenTime  string `gorm:"type:varchar(5);not null;default:'08:00'"` // "HH:MM"
 	CloseTime string `gorm:"type:varchar(5);not null;default:'20:00'"` // "HH:MM"
 	Status    Status `gorm:"type:varchar(16);not null;default:active"`
+	// RequireConfirmation makes online (app/QR) bookings start as
+	// queue.StatusPending until the point's staff confirm or reject them.
+	// Staff-created walk-ins are never pending.
+	RequireConfirmation bool `gorm:"not null;default:false"`
 	// Description/Amenities back the cabinet app's photos-and-description
 	// tab (docs/PLAN_WEB_APPS.md phase 4) — not yet surfaced by Handler.
 	Description *string        `gorm:"type:text"`

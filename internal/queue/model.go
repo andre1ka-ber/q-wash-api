@@ -10,6 +10,10 @@ import (
 type Status string
 
 const (
+	// StatusPending is an online booking awaiting staff confirmation at a
+	// point with require_confirmation. It holds its box slot and counts as
+	// the customer's active booking, but is not on the live board yet.
+	StatusPending  Status = "pending"
 	StatusQueue    Status = "queue"
 	StatusWaiting  Status = "waiting"
 	StatusWashing  Status = "washing"
@@ -27,9 +31,10 @@ const (
 )
 
 // Queue is a booking / queue entry. Status moves forward through
-// queue -> waiting -> washing -> ready; canceled is reachable only from
+// [pending ->] queue -> waiting -> washing -> ready; canceled is reachable only from
 // queue or waiting; no_show is likewise reachable from queue/waiting, and
-// both canceled and no_show can be restored to queue by staff (see
+// pending is left only by staff confirm (-> queue) or reject / customer
+// cancel (-> canceled); both canceled and no_show can be restored to queue by staff (see
 // docs/DATA_MODEL.md).
 type Queue struct {
 	ID     uuid.UUID `gorm:"type:uuid;primaryKey"`

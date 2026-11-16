@@ -93,6 +93,8 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 		q.With(requireAuth).Get("/{id}", h.get)
 		q.With(requireAuth).Get("/{id}/events", h.events)
 		q.With(requireAuth).Patch("/{id}/cancel", h.cancel)
+		q.With(requireStaff...).Patch("/{id}/confirm", h.confirm)
+		q.With(requireStaff...).Patch("/{id}/reject", h.reject)
 		q.With(requireQueueOps...).Patch("/{id}/status", h.updateStatus)
 		q.With(requireQueueOps...).Patch("/{id}/pause", h.pause)
 		q.With(requireQueueOps...).Patch("/{id}/resume", h.resume)
@@ -546,6 +548,44 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// confirm and reject are staff/admin-only (requireStaff — not worker),
+// scoped to the booking's own washing point: another point's booking 404s
+// queue_not_found, same ownership-hiding pattern as updateStatus.
+func (h *Handler) confirm(w http.ResponseWriter, r *http.Request) {
+	h.decide(w, r, h.manager.ConfirmBooking)
+}
+
+func (h *Handler) reject(w http.ResponseWriter, r *http.Request) {
+	h.decide(w, r, h.manager.RejectBooking)
+}
+
+func (h *Handler) decide(w http.ResponseWriter, r *http.Request, act func(context.Context, uuid.UUID) (*Queue, error)) {
+	authUser, ok := httputil.AuthUser(w, r)
+	if !ok {
+		return
+	}
+	id, err := httputil.ParseUUIDParam(r, "id")
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	existing, err := h.repo.FindByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	if !authUser.OwnsWashingPoint(existing.WashingPointID) {
+		httputil.WriteError(w, r, apperror.NotFound("queue_not_found", "queue entry not found"))
+		return
+	}
+	q, err := act(r.Context(), id)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, toBookingResponse(q))
 }
 
 // pause and resume are staff/worker/admin-only (requireQueueOps), scoped

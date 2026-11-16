@@ -127,6 +127,10 @@ func stageMessage(kind Kind, pointName string, boxNumber int, start time.Time) p
 		return push.Message{Title: "Вас ждут", Body: fmt.Sprintf("Время записи уже началось — подъезжайте к боксу %d · %s", boxNumber, pointName)}
 	case KindStarted:
 		return push.Message{Title: "Мойка началась", Body: fmt.Sprintf("Бокс %d · %s", boxNumber, pointName)}
+	case KindConfirmed:
+		return push.Message{Title: "Запись подтверждена", Body: fmt.Sprintf("%s, %s · бокс %d", start.In(clock.BusinessLocation).Format("15:04"), pointName, boxNumber)}
+	case KindRejected:
+		return push.Message{Title: "Запись отклонена", Body: fmt.Sprintf("%s не смогла принять запись на %s", pointName, start.In(clock.BusinessLocation).Format("15:04"))}
 	default: // KindFinished
 		return push.Message{Title: "Машина готова", Body: fmt.Sprintf("Можно забирать · %s", pointName)}
 	}
@@ -159,6 +163,24 @@ func (m *Manager) NotifyStatus(ctx context.Context, q *queue.Queue) {
 		defer cancel()
 		if err := m.NotifyStage(bg, &booking, kind); err != nil {
 			slog.ErrorContext(bg, "stage notification failed", "queue_id", booking.ID, "kind", kind, "err", err)
+		}
+	}()
+}
+
+// NotifyDecision implements queue.StageNotifier: staff confirmed or rejected
+// a pending booking. Same background, best-effort contract as NotifyStatus.
+func (m *Manager) NotifyDecision(ctx context.Context, q *queue.Queue, confirmed bool) {
+	kind := KindRejected
+	if confirmed {
+		kind = KindConfirmed
+	}
+	booking := *q
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		bg, cancel := context.WithTimeout(bg, 20*time.Second)
+		defer cancel()
+		if err := m.NotifyStage(bg, &booking, kind); err != nil {
+			slog.ErrorContext(bg, "decision notification failed", "queue_id", booking.ID, "kind", kind, "err", err)
 		}
 	}()
 }

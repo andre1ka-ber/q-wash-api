@@ -1483,8 +1483,8 @@ paths:
         (broadened from owner-only in docs/PLAN_WEB_APPS.md phase 7, for
         the worker app's "Снять" no-show action — 404 queue_not_found for
         another point's staff, not 403). Only allowed while status is
-        `queue`/`waiting` — 409 `cannot_cancel` otherwise, including
-        re-canceling.
+        `pending`/`queue`/`waiting` — 409 `cannot_cancel` otherwise,
+        including re-canceling.
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -1493,6 +1493,62 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Booking" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}/confirm:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: confirmBooking
+      summary: Confirm a pending booking
+      description: >
+        Staff/admin at the booking's own washing point (404 queue_not_found
+        for another point's staff; 403 for worker/customer). Moves a
+        `pending` booking (online booking at a point with
+        `require_confirmation`) to `queue` and pushes the customer
+        (`booking_confirmed`). 409 `not_pending` for any other status,
+        409 `status_changed` if it changed concurrently (e.g. the customer
+        canceled).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Confirmed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/queue/{id}/reject:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Queue]
+      operationId: rejectBooking
+      summary: Reject a pending booking
+      description: >
+        Same access and errors as confirm. Cancels a `pending` booking
+        (status `canceled`, slot freed) and pushes the customer
+        (`booking_rejected`).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Rejected (status canceled)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
@@ -2322,6 +2378,7 @@ components:
         status: { type: string, enum: [active, paused, pending_review] }
         description: { type: string, nullable: true }
         amenities: { type: array, items: { type: string } }
+        require_confirmation: { type: boolean, description: "Online bookings start as pending until staff confirm/reject them." }
       required: [id, name, address, latitude, longitude, boxes_count, open_time, close_time, status]
 
     WashingPointList:
@@ -2363,6 +2420,7 @@ components:
         status: { type: string, enum: [active, paused, pending_review], default: active }
         description: { type: string }
         amenities: { type: array, items: { type: string } }
+        require_confirmation: { type: boolean, default: false }
       required: [name, address, latitude, longitude]
 
     WashingPointUpdate:
@@ -2381,6 +2439,7 @@ components:
         status: { type: string, enum: [active, paused, pending_review] }
         description: { type: string }
         amenities: { type: array, items: { type: string } }
+        require_confirmation: { type: boolean }
 
     PriceOption:
       type: object
@@ -2491,7 +2550,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        status: { type: string, enum: [queue, waiting, washing, ready, canceled, no_show] }
+        status: { type: string, enum: [pending, queue, waiting, washing, ready, canceled, no_show] }
         source: { type: string, enum: [app, qr, manual] }
         user_id: { type: string, format: uuid }
         car_id: { type: string, format: uuid }
@@ -2523,7 +2582,7 @@ components:
       description: Staff-only detailed view of one booking for the cabinet's day queue.
       properties:
         id: { type: string, format: uuid }
-        status: { type: string, enum: [queue, waiting, washing, ready, canceled, no_show] }
+        status: { type: string, enum: [pending, queue, waiting, washing, ready, canceled, no_show] }
         ticket: { type: string, example: "A-11" }
         box_number: { type: integer, minimum: 0, description: "0 for overflow bookings." }
         is_overflow: { type: boolean }

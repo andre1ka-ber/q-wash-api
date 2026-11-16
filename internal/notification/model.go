@@ -28,10 +28,12 @@ const (
 type Kind string
 
 const (
-	KindReminder Kind = "reminder_1h" // ~1h before the scheduled start
-	KindLate     Kind = "late_5m"     // 5 min past the start and washing hasn't begun
-	KindStarted  Kind = "started"     // status -> washing
-	KindFinished Kind = "finished"    // status -> ready
+	KindReminder  Kind = "reminder_1h"       // ~1h before the scheduled start
+	KindLate      Kind = "late_5m"           // 5 min past the start and washing hasn't begun
+	KindStarted   Kind = "started"           // status -> washing
+	KindFinished  Kind = "finished"          // status -> ready
+	KindConfirmed Kind = "booking_confirmed" // staff confirmed a pending booking
+	KindRejected  Kind = "booking_rejected"  // staff rejected a pending booking
 )
 
 type Notification struct {

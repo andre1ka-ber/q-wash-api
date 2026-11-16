@@ -90,13 +90,13 @@ func (r *Repository) CountActiveAhead(ctx context.Context, washingPointID uuid.U
 }
 
 // HasActiveForUser reports whether userID already has a booking in
-// queue/waiting/washing status — the app-level fast path for the
+// pending/queue/waiting/washing status — the app-level fast path for the
 // one-active-booking-per-user rule that queue_one_active_booking_per_user
 // (a partial unique index) enforces as the DB-level backstop.
 func (r *Repository) HasActiveForUser(ctx context.Context, userID uuid.UUID) (bool, error) {
 	var count int64
 	err := r.db.WithContext(ctx).Model(&Queue{}).
-		Where("user_id = ? AND status IN ?", userID, []Status{StatusQueue, StatusWaiting, StatusWashing}).
+		Where("user_id = ? AND status IN ?", userID, []Status{StatusPending, StatusQueue, StatusWaiting, StatusWashing}).
 		Count(&count).Error
 	if err != nil {
 		return false, apperror.Internal(err)
@@ -255,6 +255,7 @@ func (r *Repository) UpdateStatus(ctx context.Context, q *Queue, from Status) er
 	case StatusCanceled:
 		updates["canceled_at"] = q.CanceledAt
 	case StatusQueue:
+		// Also reached from pending (confirm), where it is already nil.
 		updates["canceled_at"] = nil
 	}
 	res := r.db.WithContext(ctx).Model(&Queue{}).Where("id = ? AND status = ?", q.ID, from).Updates(updates)
