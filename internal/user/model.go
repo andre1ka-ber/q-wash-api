@@ -36,6 +36,10 @@ type User struct {
 	// work at; always nil for admin (network-wide) and customer.
 	WashingPointID *uuid.UUID `gorm:"type:uuid;index"`
 	LastLoginAt    *time.Time
+	// LastPlatform/LastAppVersion are the client bucket of the latest login
+	// (see internal/platform/clientinfo) — device stats in the admin app.
+	LastPlatform   *string `gorm:"type:varchar(16)"`
+	LastAppVersion *string `gorm:"type:varchar(32)"`
 	// Username/PasswordHash are only set for staff/admin accounts that log
 	// in via POST /auth/login (the queue board and staff panel) instead of
 	// phone+OTP. Customers leave both nil.

@@ -282,6 +282,9 @@ func (s *Service) loginByPhone(ctx context.Context, phone string, now time.Time)
 	if err := s.userRepo.UpdateLastLogin(ctx, u.ID, now); err != nil {
 		return nil, err
 	}
+	if err := s.userRepo.RecordLogin(ctx, u, now); err != nil {
+		return nil, err
+	}
 	u.LastLoginAt = &now
 
 	return s.issueTokenPair(ctx, u)
@@ -352,6 +355,9 @@ func (s *Service) LoginWithPassword(ctx context.Context, username, password stri
 
 	now := time.Now()
 	if err := s.userRepo.UpdateLastLogin(ctx, u.ID, now); err != nil {
+		return nil, err
+	}
+	if err := s.userRepo.RecordLogin(ctx, u, now); err != nil {
 		return nil, err
 	}
 	u.LastLoginAt = &now

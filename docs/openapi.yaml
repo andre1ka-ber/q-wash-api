@@ -2263,6 +2263,67 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/v1/admin/analytics:
+    get:
+      tags: [Admin]
+      operationId: getAdminAnalytics
+      summary: Network-wide operations analytics for a period
+      description: >
+        Requires role admin. Windows are whole calendar days in Asia/Dushanbe;
+        "7" and "30" end with today. `previous` is the window of the same
+        length right before `current` (for delta chips). Bookings are counted
+        by scheduled start. Revenue is the sum of the price options of every
+        service on bookings that reached `ready`, at the options' current
+        price (bookings keep no price snapshot). `series` buckets: today = 2h
+        buckets 08-22 (earlier/later bookings fold into the edge buckets),
+        7 = one per day, 30 = four 7-day weeks plus the last two days.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [today, "7", "30"], default: today }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAnalytics" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/analytics/platform:
+    get:
+      tags: [Admin]
+      operationId: getAdminPlatformAnalytics
+      summary: Platform usage — clients, staff activity, devices, booking channels
+      description: >
+        Requires role admin. Same `period` windows as /admin/analytics.
+        `series` = distinct customers with a booking per bucket. `washes` has
+        one row per non-pending point: last staff/worker login, role and device
+        of the latest tracked login, login sessions and distinct login days in
+        the last 7 days, bookings in the last 7 days, and an activity
+        `health` (ok: login within 3 days, warn: 3–7 days, bad: older or
+        never). `devices`/`versions` come from the customers' latest tracked
+        login (clients announce themselves with the X-Client-Platform and
+        X-App-Version headers; the raw User-Agent and the IP are never stored),
+        so they fill up as customers log in again. `channels` = bookings in
+        the period by source (app / qr / manual).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [today, "7", "30"], default: today }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminPlatformAnalytics" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3038,9 +3099,13 @@ components:
         status: { type: string, enum: [active, paused, pending_review] }
         boxes_count: { type: integer, minimum: 1 }
         services_count: { type: integer, minimum: 0 }
+        accounts_count:
+          type: integer
+          minimum: 0
+          description: Staff/worker login accounts scoped to the point (admin "Доступ" column).
         cover_url: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
-      required: [id, name, address, status, boxes_count, services_count, created_at]
+      required: [id, name, address, status, boxes_count, services_count, accounts_count, created_at]
 
     AdminWashingPointList:
       type: object
@@ -3054,9 +3119,123 @@ components:
         points_total: { type: integer, minimum: 0 }
         points_active: { type: integer, minimum: 0 }
         bookings_today: { type: integer, minimum: 0 }
+        points_added_30d: { type: integer, minimum: 0, description: Points created in the last 30 days }
         canceled_today: { type: integer, minimum: 0 }
+        bookings_yesterday: { type: integer, minimum: 0, description: Same count as bookings_today for the previous calendar day }
         average_utilization: { type: number, format: double, minimum: 0 }
-      required: [points_total, points_active, bookings_today, canceled_today, average_utilization]
+        average_utilization_yesterday:
+          type: number
+          format: double
+          minimum: 0
+          description: Same ratio for the previous calendar day, using the points' current opening hours.
+      required: [points_total, points_active, points_added_30d, bookings_today, canceled_today, bookings_yesterday, average_utilization, average_utilization_yesterday]
+
+    AdminAnalyticsTotals:
+      type: object
+      properties:
+        bookings: { type: integer, minimum: 0 }
+        canceled: { type: integer, minimum: 0, description: Canceled plus no-show }
+        revenue_cents: { type: integer, minimum: 0 }
+        new_customers: { type: integer, minimum: 0 }
+        cancel_share: { type: number, format: double, minimum: 0, maximum: 1 }
+      required: [bookings, canceled, revenue_cents, new_customers, cancel_share]
+
+    AdminAnalytics:
+      type: object
+      properties:
+        period: { type: string, enum: [today, "7", "30"] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        current: { $ref: "#/components/schemas/AdminAnalyticsTotals" }
+        previous: { $ref: "#/components/schemas/AdminAnalyticsTotals" }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+              value: { type: integer, minimum: 0 }
+            required: [start, end, value]
+        top_points:
+          type: array
+          description: Up to 5 points by revenue
+          items:
+            type: object
+            properties:
+              washing_point_id: { type: string, format: uuid }
+              name: { type: string }
+              revenue_cents: { type: integer, minimum: 0 }
+            required: [washing_point_id, name, revenue_cents]
+      required: [period, from, to, current, previous, series, top_points]
+
+    AdminPlatformAnalytics:
+      type: object
+      properties:
+        period: { type: string, enum: [today, "7", "30"] }
+        kpis:
+          type: object
+          properties:
+            customers_total: { type: integer }
+            customers_new: { type: integer }
+            customers_new_prev: { type: integer }
+            customers_active: { type: integer, description: Customers with a non-canceled booking in the period }
+            customers_active_prev: { type: integer }
+            staff_total: { type: integer, description: Staff and worker login accounts }
+            staff_active: { type: integer, description: Of those, logged in during the period }
+          required: [customers_total, customers_new, customers_new_prev, customers_active, customers_active_prev, staff_total, staff_active]
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+              value: { type: integer }
+            required: [start, end, value]
+        health:
+          type: object
+          properties:
+            unconfirmed_over_15_min: { type: integer, description: Bookings still pending confirmation for over 15 minutes }
+            inactive_points_7d: { type: integer, description: Points whose staff have not logged in for over 7 days (or never) }
+            canceled_in_period: { type: integer, description: Canceled plus no-show }
+          required: [unconfirmed_over_15_min, inactive_points_7d, canceled_in_period]
+        washes:
+          type: array
+          items:
+            type: object
+            properties:
+              washing_point_id: { type: string, format: uuid }
+              name: { type: string }
+              last_login_at: { type: string, format: date-time, nullable: true }
+              last_role: { type: string, nullable: true, enum: [staff, worker, admin] }
+              last_platform: { type: string, nullable: true, enum: [android, ios, web, other] }
+              staff: { type: integer }
+              sessions_7d: { type: integer }
+              bookings_7d: { type: integer }
+              active_days_7d: { type: integer, minimum: 0, maximum: 7 }
+              health: { type: string, enum: [ok, warn, bad] }
+            required: [washing_point_id, name, last_login_at, staff, sessions_7d, bookings_7d, active_days_7d, health]
+        devices:
+          type: array
+          description: Customers by platform of their latest tracked login
+          items: { $ref: "#/components/schemas/AdminCountBy" }
+        versions:
+          type: array
+          description: Top app versions among android/ios customers
+          items: { $ref: "#/components/schemas/AdminCountBy" }
+        channels:
+          type: array
+          description: Bookings in the period by source
+          items: { $ref: "#/components/schemas/AdminCountBy" }
+      required: [period, kpis, series, health, washes, devices, versions, channels]
+
+    AdminCountBy:
+      type: object
+      properties:
+        key: { type: string }
+        count: { type: integer, minimum: 0 }
+      required: [key, count]
 
     Photo:
       type: object

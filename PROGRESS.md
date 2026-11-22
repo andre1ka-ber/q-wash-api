@@ -489,3 +489,12 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   Pending is excluded from live boards/`cars_ahead`/reminders, included in `queue/day`. Pushes `booking_confirmed`/`booking_rejected`.
   Tests: integration `booking_confirmation_test.go`. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `db-schema.md`/`edge-cases.md`.
   Cabinet / mobile / `q-wash-shared` pending (platform `plan-booking-confirmation.md`).
+
+- 2026-11-22 — Admin app support (design sync): `GET /admin/washing-points` gains `accounts_count`; `GET /admin/stats` gains `points_added_30d`,
+  `bookings_yesterday`, `average_utilization_yesterday` (delta chips); new `GET /admin/analytics?period=today|7|30` (bookings/revenue/new customers/cancel share
+  vs the previous window, chart series, top points by revenue — revenue = `ready` bookings at current price-option prices, no price snapshot exists) and
+  `GET /admin/analytics/platform?period=` (customers, staff activity per point, devices/app versions, booking channels). Migration `000032_login_tracking`:
+  `users.last_platform/last_app_version` + `login_events` (written by `user.Repository.RecordLogin` on both login paths; platform/version come from the optional
+  `X-Client-Platform` / `X-App-Version` headers via `platform/clientinfo`, UA fallback; no IP / raw UA stored; both headers added to CORS).
+  Tests: unit `admin/analytics_test.go`, `admin/handler_test.go`, `clientinfo_test.go`; integration `admin_analytics_test.go`. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`.
+  Not done: platform settings (booking rules / toggles) — those rules do not exist in the backend yet, see `q-wash-admin/plan.md`.

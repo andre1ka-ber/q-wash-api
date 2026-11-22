@@ -116,7 +116,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	bookingPhotoManager := bookingphoto.NewManager(bookingPhotoRepo, fileStorage)
 	bookingPhotoHandler := bookingphoto.NewHandler(bookingPhotoRepo, bookingPhotoManager, queueRepo)
 
-	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo)
+	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo, userRepo, admin.NewAnalyticsRepository(database))
 
 	qrCodeRepo := qrcode.NewRepository(database)
 	qrCodeManager := qrcode.NewManager(qrCodeRepo, wpRepo, queueRepo)

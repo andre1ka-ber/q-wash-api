@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"q-wash-api/internal/apperror"
+	"q-wash-api/internal/platform/clientinfo"
 )
 
 type Repository struct {
@@ -129,4 +130,61 @@ func (r *Repository) UpdateName(ctx context.Context, id uuid.UUID, name string) 
 		return nil, apperror.Internal(err)
 	}
 	return r.FindByID(ctx, id)
+}
+
+// CountLoginAccountsByWashingPointIDs batch-counts the staff/worker login
+// accounts (username set) per washing point — the admin list's "Доступ"
+// column. Points with no account are absent from the map (count 0).
+func (r *Repository) CountLoginAccountsByWashingPointIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int64, error) {
+	counts := make(map[uuid.UUID]int64, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	var rows []struct {
+		WashingPointID uuid.UUID
+		N              int64
+	}
+	err := r.db.WithContext(ctx).Model(&User{}).
+		Select("washing_point_id, COUNT(*) AS n").
+		Where("washing_point_id IN ? AND role IN ? AND username IS NOT NULL", ids, []Role{RoleStaff, RoleWorker}).
+		Group("washing_point_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	for _, row := range rows {
+		counts[row.WashingPointID] = row.N
+	}
+	return counts, nil
+}
+
+// RecordLogin stores one login event for u (who just authenticated) and
+// remembers the client's platform/version on the user row. Call it right
+// after UpdateLastLogin; the client info comes from ctx
+// (platform/clientinfo's middleware).
+func (r *Repository) RecordLogin(ctx context.Context, u *User, at time.Time) error {
+	info := clientinfo.From(ctx)
+	var version *string
+	if info.Version != "" {
+		version = &info.Version
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			`INSERT INTO login_events (id, user_id, role, washing_point_id, platform, app_version, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, u.ID, string(u.Role), u.WashingPointID, info.Platform, version, at,
+		).Error; err != nil {
+			return err
+		}
+		return tx.Model(&User{}).Where("id = ?", u.ID).
+			Updates(map[string]any{"last_platform": info.Platform, "last_app_version": version}).Error
+	})
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
 }

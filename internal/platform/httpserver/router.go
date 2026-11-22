@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/cors"
 	"gorm.io/gorm"
 
+	"q-wash-api/internal/platform/clientinfo"
 	"q-wash-api/internal/platform/monitoring"
 )
 
@@ -47,12 +48,13 @@ func NewRouter(database *gorm.DB, corsAllowedOrigins []string, sentryDSN string,
 	r.Use(securityHeaders(production))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(clientinfo.Middleware)
 	r.Use(monitoring.Middleware(sentryDSN))
 	r.Use(skipTimeoutForSSE(30 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsAllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type", clientinfo.HeaderPlatform, clientinfo.HeaderVersion},
 		AllowCredentials: false, // auth is a Bearer token, not cookies
 		MaxAge:           300,
 	}))
