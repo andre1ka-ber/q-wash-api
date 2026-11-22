@@ -16,6 +16,7 @@ import (
 	"q-wash-api/internal/car"
 	"q-wash-api/internal/platform/clock"
 	"q-wash-api/internal/platform/eventbus"
+	"q-wash-api/internal/platformsettings"
 	"q-wash-api/internal/schedule"
 	"q-wash-api/internal/service"
 	"q-wash-api/internal/user"
@@ -35,6 +36,7 @@ type Manager struct {
 	boxRepo      *box.Repository
 	bus          *eventbus.Bus
 	notifier     StageNotifier
+	settings     platformsettings.Provider
 }
 
 // StageNotifier is told after a booking's status changes so the customer can
@@ -46,11 +48,27 @@ type StageNotifier interface {
 	// NotifyDecision tells the customer whether staff confirmed or
 	// rejected their pending booking.
 	NotifyDecision(ctx context.Context, q *Queue, confirmed bool)
+	// NotifyBooked is called once a booking is settled in the queue
+	// (created without needing confirmation, or confirmed by staff) so the
+	// SMS ticket can go out when the platform setting is on.
+	NotifyBooked(ctx context.Context, q *Queue)
 }
 
 // SetStageNotifier wires the optional notifier; without one, status changes
 // notify nobody.
 func (m *Manager) SetStageNotifier(n StageNotifier) { m.notifier = n }
+
+// SetSettings wires the platform rules (booking horizon, cancel cutoff,
+// no-show sweep). Without it none of those rules apply.
+func (m *Manager) SetSettings(p platformsettings.Provider) { m.settings = p }
+
+func (m *Manager) currentSettings(ctx context.Context) (platformsettings.Settings, bool, error) {
+	if m.settings == nil {
+		return platformsettings.Settings{}, false, nil
+	}
+	s, err := m.settings.Get(ctx)
+	return s, err == nil, err
+}
 
 func NewManager(db *gorm.DB, repo *Repository, carRepo *car.Repository, serviceRepo *service.Repository, wpRepo *washingpoint.Repository, scheduleRepo *schedule.Repository, boxRepo *box.Repository, bus *eventbus.Bus) *Manager {
 	return &Manager{db: db, repo: repo, carRepo: carRepo, serviceRepo: serviceRepo, wpRepo: wpRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
@@ -241,6 +259,10 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, apperror.Conflict("active_booking_exists", "you already have an active booking")
 	}
 
+	if err := m.checkHorizon(ctx, in.ScheduledStartAt); err != nil {
+		return nil, err
+	}
+
 	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, true, false, nil)
 	if err != nil {
 		return nil, err
@@ -268,6 +290,9 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, err
 	}
 	m.bus.Publish(plan.wp.ID)
+	if q.Status == StatusQueue && m.notifier != nil {
+		m.notifier.NotifyBooked(ctx, q)
+	}
 	return q, nil
 }
 
@@ -438,6 +463,9 @@ func (m *Manager) decide(ctx context.Context, id uuid.UUID, confirm bool) (*Queu
 	m.bus.Publish(q.WashingPointID)
 	if m.notifier != nil {
 		m.notifier.NotifyDecision(ctx, q, confirm)
+		if confirm {
+			m.notifier.NotifyBooked(ctx, q)
+		}
 	}
 	return q, nil
 }

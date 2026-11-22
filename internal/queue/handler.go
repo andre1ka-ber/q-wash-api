@@ -537,6 +537,15 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The platform's cancel cutoff only limits customers; staff/worker/admin
+	// canceling at their point (e.g. removing a no-show) are never blocked.
+	if authUser.Role == string(user.RoleCustomer) {
+		if err := h.manager.EnforceCancelCutoff(r.Context(), existing, time.Now()); err != nil {
+			httputil.WriteError(w, r, err)
+			return
+		}
+	}
+
 	q, err := h.manager.CancelBooking(r.Context(), id)
 	if err != nil {
 		httputil.WriteError(w, r, err)

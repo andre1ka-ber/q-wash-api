@@ -19,6 +19,7 @@ import (
 	"q-wash-api/internal/owner"
 	"q-wash-api/internal/photo"
 	"q-wash-api/internal/platform/clock"
+	"q-wash-api/internal/platformsettings"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/service"
 	"q-wash-api/internal/user"
@@ -33,16 +34,19 @@ type Handler struct {
 	photoRepo     *photo.Repository
 	userRepo      *user.Repository
 	analyticsRepo *AnalyticsRepository
+	settings      *platformsettings.Handler
 }
 
-func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository, photoRepo *photo.Repository, userRepo *user.Repository, analyticsRepo *AnalyticsRepository) *Handler {
-	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo, photoRepo: photoRepo, userRepo: userRepo, analyticsRepo: analyticsRepo}
+func NewHandler(wpRepo *washingpoint.Repository, ownerRepo *owner.Repository, serviceRepo *service.Repository, queueRepo *queue.Repository, photoRepo *photo.Repository, userRepo *user.Repository, analyticsRepo *AnalyticsRepository, settings *platformsettings.Handler) *Handler {
+	return &Handler{wpRepo: wpRepo, ownerRepo: ownerRepo, serviceRepo: serviceRepo, queueRepo: queueRepo, photoRepo: photoRepo, userRepo: userRepo, analyticsRepo: analyticsRepo, settings: settings}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router, requireAdmin ...func(http.Handler) http.Handler) {
 	r.Route("/admin", func(a chi.Router) {
 		a.With(requireAdmin...).Get("/washing-points", h.listWashingPoints)
 		a.With(requireAdmin...).Get("/stats", h.stats)
+		a.With(requireAdmin...).Get("/settings", h.settings.Get)
+		a.With(requireAdmin...).Patch("/settings", h.settings.Patch)
 		a.With(requireAdmin...).Get("/analytics", h.analytics)
 		a.With(requireAdmin...).Get("/analytics/platform", h.platformAnalytics)
 	})

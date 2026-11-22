@@ -154,6 +154,7 @@ type testEnv struct {
 	push    *spyPush
 	db      *gorm.DB
 	cfg     config.Config
+	jobs    app.Jobs
 }
 
 // newTestEnv boots an API on a fresh Postgres. opts tweak the config before
@@ -227,10 +228,11 @@ func newTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 
 	sender := &spySender{}
 	pushSpy := &spyPush{}
-	server := httptest.NewServer(app.New(database, cfg, sender, sender, pushSpy, fileStorage))
+	handler, jobs := app.New(database, cfg, sender, sender, pushSpy, fileStorage)
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	return &testEnv{baseURL: server.URL, client: server.Client(), sms: sender, push: pushSpy, db: database, cfg: cfg}
+	return &testEnv{baseURL: server.URL, client: server.Client(), sms: sender, push: pushSpy, db: database, cfg: cfg, jobs: jobs}
 }
 
 // promoteToRole directly updates a user's role in the DB. There is no API

@@ -384,3 +384,20 @@ func (r *Repository) attachItems(ctx context.Context, rows []Queue) ([]Queue, er
 	}
 	return rows, nil
 }
+
+// FindOverdueQueued returns customer-made bookings (app/QR) still in status
+// "queue" — booked but never marked as arrived — whose scheduled start is at
+// or before cutoff. Walk-ins and overflow bookings (staff-created, the
+// customer is on site) and unconfirmed "pending" ones are never included.
+func (r *Repository) FindOverdueQueued(ctx context.Context, cutoff time.Time) ([]Queue, error) {
+	var rows []Queue
+	err := r.db.WithContext(ctx).
+		Where("status = ? AND source IN ? AND is_overflow = false AND scheduled_start_at <= ?",
+			StatusQueue, []Source{SourceApp, SourceQR}, cutoff).
+		Order("scheduled_start_at").
+		Find(&rows).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return rows, nil
+}

@@ -8,6 +8,7 @@ import (
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/owner"
+	"q-wash-api/internal/platformsettings"
 	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
 )
@@ -28,6 +29,7 @@ type Manager struct {
 	wpRepo         *washingpoint.Repository
 	scheduleSeeder ScheduleSeeder
 	boxSeeder      BoxSeeder
+	settings       platformsettings.Provider
 }
 
 // ScheduleSeeder provisions a newly created washing point's initial
@@ -45,6 +47,11 @@ type ScheduleSeeder interface {
 type BoxSeeder interface {
 	SeedDefault(ctx context.Context, washingPointID uuid.UUID, count int) error
 }
+
+// SetSettings wires the platform settings: with new_point_moderation turned
+// off an approved application goes live at once instead of waiting for an
+// admin to activate the point. Without settings the point always waits.
+func (m *Manager) SetSettings(p platformsettings.Provider) { m.settings = p }
 
 func NewManager(repo *Repository, ownerRepo *owner.Repository, wpRepo *washingpoint.Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder) *Manager {
 	return &Manager{repo: repo, ownerRepo: ownerRepo, wpRepo: wpRepo, scheduleSeeder: scheduleSeeder, boxSeeder: boxSeeder}
@@ -85,6 +92,13 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 		OpenTime:   "08:00",
 		CloseTime:  "20:00",
 		Status:     washingpoint.StatusPendingReview,
+	}
+	if m.settings != nil {
+		if s, err := m.settings.Get(ctx); err != nil {
+			return nil, nil, user.PointAccounts{}, err
+		} else if !s.NewPointModeration {
+			wp.Status = washingpoint.StatusActive
+		}
 	}
 	// CreateWithAccounts also provisions the point's staff+worker logins
 	// (same call washingpoint.Handler.create uses), atomically with the

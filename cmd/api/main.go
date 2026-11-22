@@ -89,7 +89,7 @@ func run() error {
 	}
 
 	// Booking-stage notifications stay on the stub: only OTP goes out via the provider.
-	handler := app.New(database, cfg, sms.NewStubSender(), otpSender, pushSender, fileStorage)
+	handler, jobs := app.New(database, cfg, sms.NewStubSender(), otpSender, pushSender, fileStorage)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,
@@ -102,6 +102,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go jobs.NoShow.Run(ctx)
 	go app.NewNotificationScheduler(database, sms.NewStubSender(), pushSender, time.Minute).Run(ctx)
 
 	serveErr := make(chan error, 1)

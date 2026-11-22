@@ -497,4 +497,11 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   `users.last_platform/last_app_version` + `login_events` (written by `user.Repository.RecordLogin` on both login paths; platform/version come from the optional
   `X-Client-Platform` / `X-App-Version` headers via `platform/clientinfo`, UA fallback; no IP / raw UA stored; both headers added to CORS).
   Tests: unit `admin/analytics_test.go`, `admin/handler_test.go`, `clientinfo_test.go`; integration `admin_analytics_test.go`. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`.
-  Not done: platform settings (booking rules / toggles) — those rules do not exist in the backend yet, see `q-wash-admin/plan.md`.
+  Platform settings were added the same day, see the next entry.
+
+- 2026-11-22 — **Platform settings** (admin "Настройки"): migration `000033_platform_settings` (single row), `GET/PATCH /admin/settings` (admin), and the rules enforced for real:
+  `booking_horizon_days` (customer `POST /queue` → 400 `too_far_ahead`), `client_cancel_cutoff_min` (customer cancel → 409 `cancel_too_late`; staff exempt),
+  `no_show_auto_cancel_min` (`queue.NoShowSweeper`, every minute, app/QR bookings still in `queue`), `sms_confirmation` (SMS ticket via `notification.Manager.NotifyBooked`,
+  new `StageNotifier` method + kind `ticket_sms`), `new_point_moderation` (connection-request approval creates an `active` point when off). Defaults keep the old behavior.
+  `app.New` now returns `(http.Handler, app.Jobs)`; `cmd/api` runs `jobs.NoShow`. Tests: unit `platformsettings`, `queue/rules_test.go`; integration `platform_settings_test.go`.
+  Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `docs/edge-cases.md`.

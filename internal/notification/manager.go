@@ -15,6 +15,7 @@ import (
 	"q-wash-api/internal/platform/push"
 	"q-wash-api/internal/platform/reqctx"
 	"q-wash-api/internal/platform/sms"
+	"q-wash-api/internal/platformsettings"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/user"
 	"q-wash-api/internal/washingpoint"
@@ -37,11 +38,15 @@ type Manager struct {
 	wpRepo     *washingpoint.Repository
 	sms        sms.Sender
 	push       push.Sender
+	settings   platformsettings.Provider
 }
 
 func NewManager(repo *Repository, userRepo *user.Repository, queueRepo *queue.Repository, deviceRepo *device.Repository, wpRepo *washingpoint.Repository, smsSender sms.Sender, pushSender push.Sender) *Manager {
 	return &Manager{repo: repo, userRepo: userRepo, queueRepo: queueRepo, deviceRepo: deviceRepo, wpRepo: wpRepo, sms: smsSender, push: pushSender}
 }
+
+// SetSettings wires the platform settings; without them no SMS ticket is sent.
+func (m *Manager) SetSettings(p platformsettings.Provider) { m.settings = p }
 
 type CreateInput struct {
 	UserID  uuid.UUID
@@ -165,6 +170,57 @@ func (m *Manager) NotifyStatus(ctx context.Context, q *queue.Queue) {
 			slog.ErrorContext(bg, "stage notification failed", "queue_id", booking.ID, "kind", kind, "err", err)
 		}
 	}()
+}
+
+// NotifyBooked implements queue.StageNotifier: a customer booking is now
+// settled in the queue. When the platform setting sms_confirmation is on, the
+// customer gets an SMS ticket (once per booking). Same background,
+// best-effort contract as NotifyStatus: it never blocks or fails the booking.
+func (m *Manager) NotifyBooked(ctx context.Context, q *queue.Queue) {
+	if m.settings == nil || q.IsOverflow || q.Source == queue.SourceManual {
+		return
+	}
+	booking := *q
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		bg, cancel := context.WithTimeout(bg, 20*time.Second)
+		defer cancel()
+		if err := m.sendTicketSMS(bg, &booking); err != nil {
+			slog.ErrorContext(bg, "ticket sms failed", "queue_id", booking.ID, "err", err)
+		}
+	}()
+}
+
+func (m *Manager) sendTicketSMS(ctx context.Context, q *queue.Queue) error {
+	s, err := m.settings.Get(ctx)
+	if err != nil || !s.SMSConfirmation {
+		return err
+	}
+	u, err := m.userRepo.FindByID(ctx, q.UserID)
+	if err != nil {
+		return err
+	}
+	phone := u.PhoneOrEmpty()
+	if phone == "" {
+		return nil
+	}
+	wp, err := m.wpRepo.FindByID(ctx, q.WashingPointID)
+	if err != nil {
+		return err
+	}
+	start := q.ScheduledStartAt.In(clock.BusinessLocation)
+	kind := KindTicketSMS
+	n := &Notification{
+		UserID: q.UserID, QueueID: &q.ID, Status: StatusPending, Channel: ChannelSMS, Kind: &kind,
+		Text:   fmt.Sprintf("Q Wash: запись подтверждена. %s, %s в %s, бокс %d.", wp.Name, start.Format("02.01"), start.Format("15:04"), q.BoxNumber),
+		SendAt: time.Now(),
+	}
+	created, err := m.repo.CreateOnce(ctx, n)
+	if err != nil || !created {
+		return err
+	}
+	m.attemptSend(ctx, phone, n)
+	return nil
 }
 
 // NotifyDecision implements queue.StageNotifier: staff confirmed or rejected

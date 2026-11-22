@@ -12,6 +12,11 @@ import (
 
 func TestQueue_MultiServiceBooking(t *testing.T) {
 	env := newTestEnv(t)
+	// These scenarios book customer visits 10+ days out to stay clear of other
+	// tests; widen the platform's booking horizon (default 7 days) accordingly.
+	if err := env.db.Exec("UPDATE platform_settings SET booking_horizon_days = 60").Error; err != nil {
+		t.Fatalf("widen booking horizon: %v", err)
+	}
 	staffPhone := uniquePhone(230)
 	env.loginAs(t, staffPhone, user.RoleStaff)
 	adminAccess := env.loginAs(t, uniquePhone(231), user.RoleAdmin)

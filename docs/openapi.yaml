@@ -2324,6 +2324,54 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/v1/admin/settings:
+    get:
+      tags: [Admin]
+      operationId: getAdminSettings
+      summary: Platform rules edited in the admin "Настройки" screen
+      description: Requires role admin. See PATCH for what each setting does.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [Admin]
+      operationId: updateAdminSettings
+      summary: Change platform rules (partial update)
+      description: >
+        Requires role admin. Applies at once. `booking_horizon_days`: customer
+        bookings beyond the end of the day N days from today are rejected with
+        400 `too_far_ahead` (staff manual bookings are not limited).
+        `client_cancel_cutoff_min`: a customer canceling a pending/queue
+        booking less than N minutes before its start gets 409
+        `cancel_too_late` (staff/worker/admin and already-arrived customers are
+        never blocked); 0 = off. `no_show_auto_cancel_min`: a background sweep
+        marks app/QR bookings still in `queue` as `no_show` N minutes after
+        their start; 0 = off. `sms_confirmation`: one SMS ticket per settled
+        customer booking. `new_point_moderation`: when false, an approved
+        connection request creates an `active` point instead of
+        `pending_review`.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformSettingsUpdate" }
+      responses:
+        "200":
+          description: The settings after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3129,6 +3177,27 @@ components:
           minimum: 0
           description: Same ratio for the previous calendar day, using the points' current opening hours.
       required: [points_total, points_active, points_added_30d, bookings_today, canceled_today, bookings_yesterday, average_utilization, average_utilization_yesterday]
+
+    PlatformSettings:
+      type: object
+      properties:
+        booking_horizon_days: { type: integer, minimum: 1, maximum: 60 }
+        no_show_auto_cancel_min: { type: integer, minimum: 0, maximum: 240, description: 0 = off }
+        client_cancel_cutoff_min: { type: integer, minimum: 0, maximum: 1440, description: 0 = off }
+        sms_confirmation: { type: boolean }
+        new_point_moderation: { type: boolean }
+        updated_at: { type: string, format: date-time }
+      required: [booking_horizon_days, no_show_auto_cancel_min, client_cancel_cutoff_min, sms_confirmation, new_point_moderation, updated_at]
+
+    PlatformSettingsUpdate:
+      type: object
+      description: Any subset of the settings; at least one field.
+      properties:
+        booking_horizon_days: { type: integer, minimum: 1, maximum: 60 }
+        no_show_auto_cancel_min: { type: integer, minimum: 0, maximum: 240 }
+        client_cancel_cutoff_min: { type: integer, minimum: 0, maximum: 1440 }
+        sms_confirmation: { type: boolean }
+        new_point_moderation: { type: boolean }
 
     AdminAnalyticsTotals:
       type: object

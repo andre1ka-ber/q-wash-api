@@ -34,6 +34,7 @@ const (
 	KindFinished  Kind = "finished"          // status -> ready
 	KindConfirmed Kind = "booking_confirmed" // staff confirmed a pending booking
 	KindRejected  Kind = "booking_rejected"  // staff rejected a pending booking
+	KindTicketSMS Kind = "ticket_sms"        // SMS ticket for a settled booking (platform setting sms_confirmation)
 )
 
 type Notification struct {

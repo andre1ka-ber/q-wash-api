@@ -30,6 +30,7 @@ import (
 	"q-wash-api/internal/platform/ratelimit"
 	"q-wash-api/internal/platform/sms"
 	"q-wash-api/internal/platform/storage"
+	"q-wash-api/internal/platformsettings"
 	"q-wash-api/internal/qrcode"
 	"q-wash-api/internal/queue"
 	"q-wash-api/internal/schedule"
@@ -46,7 +47,16 @@ import (
 // smsSender (free-text notifications), otpSender (login codes) and fileStorage are injected (rather than constructed
 // internally) so tests can pass a spy sender / a temp-dir-backed storage
 // instead of the stdout stub / uploads dir cmd/api uses in dev.
-func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender sms.OTPSender, pushSender push.Sender, fileStorage storage.Storage) http.Handler {
+// Jobs are the background tasks that share the handler's wiring (same event
+// bus, same settings) and so are built together with it; cmd/api runs them,
+// tests call Tick directly.
+type Jobs struct {
+	// NoShow marks customer bookings that never arrived as no-show when the
+	// platform setting no_show_auto_cancel_min is on.
+	NoShow *queue.NoShowSweeper
+}
+
+func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender sms.OTPSender, pushSender push.Sender, fileStorage storage.Storage) (http.Handler, Jobs) {
 	// Sentry is production-only: an empty DSN here (whether Monitoring.DSN was
 	// never set, or this just isn't a production deploy) makes the middleware
 	// a passthrough.
@@ -61,6 +71,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 		WithPrivilegedTTL(cfg.Auth.StaffAccessTokenTTL)
 
 	userRepo := user.NewRepository(database)
+	settingsRepo := platformsettings.NewRepository(database)
 	userHandler := user.NewHandler(userRepo)
 
 	authRepo := auth.NewRepository(database)
@@ -91,6 +102,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 
 	queueRepo := queue.NewRepository(database)
 	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, boxRepo, queueBus)
+	queueManager.SetSettings(settingsRepo)
 	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, boxRepo, queueBus)
 
 	deviceRepo := device.NewRepository(database)
@@ -99,6 +111,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	notificationRepo := notification.NewRepository(database)
 	notificationManager := notification.NewManager(notificationRepo, userRepo, queueRepo, deviceRepo, wpRepo, smsSender, pushSender)
 	notificationHandler := notification.NewHandler(notificationRepo, notificationManager)
+	notificationManager.SetSettings(settingsRepo)
 	queueManager.SetStageNotifier(notificationManager)
 
 	ownerRepo := owner.NewRepository(database)
@@ -106,6 +119,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 
 	connectionRequestRepo := connectionrequest.NewRepository(database)
 	connectionRequestManager := connectionrequest.NewManager(connectionRequestRepo, ownerRepo, wpRepo, scheduleManager, boxManager)
+	connectionRequestManager.SetSettings(settingsRepo)
 	connectionRequestHandler := connectionrequest.NewHandler(connectionRequestRepo, connectionRequestManager)
 
 	photoRepo := photo.NewRepository(database)
@@ -116,7 +130,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	bookingPhotoManager := bookingphoto.NewManager(bookingPhotoRepo, fileStorage)
 	bookingPhotoHandler := bookingphoto.NewHandler(bookingPhotoRepo, bookingPhotoManager, queueRepo)
 
-	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo, userRepo, admin.NewAnalyticsRepository(database))
+	adminHandler := admin.NewHandler(wpRepo, ownerRepo, serviceRepo, queueRepo, photoRepo, userRepo, admin.NewAnalyticsRepository(database), platformsettings.NewHandler(settingsRepo))
 
 	qrCodeRepo := qrcode.NewRepository(database)
 	qrCodeManager := qrcode.NewManager(qrCodeRepo, wpRepo, queueRepo)
@@ -176,7 +190,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 		deviceHandler.RegisterRoutes(protected)
 	})
 
-	return router
+	return router, Jobs{NoShow: queue.NewNoShowSweeper(queueManager, time.Minute)}
 }
 
 // NewNotificationScheduler builds the background job that sends the
