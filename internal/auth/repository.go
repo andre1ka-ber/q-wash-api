@@ -43,11 +43,54 @@ func (r *Repository) LatestActiveOTPCode(ctx context.Context, phone string) (*OT
 	return &o, nil
 }
 
-func (r *Repository) SaveOTPCode(ctx context.Context, o *OTPCode) error {
-	if err := r.db.WithContext(ctx).Save(o).Error; err != nil {
-		return apperror.Internal(err)
+// WithPhoneLock runs fn in a transaction holding an advisory lock for phone,
+// so concurrent code requests for one number run one after another and each
+// sees the codes issued before it.
+func (r *Repository) WithPhoneLock(ctx context.Context, phone string, fn func(*Repository) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", phone).Error; err != nil {
+			return apperror.Internal(err)
+		}
+		return fn(NewRepository(tx))
+	})
+}
+
+// CountOTPCodesSince counts the codes issued to phone after since, consumed or
+// not.
+func (r *Repository) CountOTPCodesSince(ctx context.Context, phone string, since time.Time) (int64, error) {
+	var n int64
+	err := r.db.WithContext(ctx).Model(&OTPCode{}).
+		Where("phone_number = ? AND created_at > ?", phone, since).
+		Count(&n).Error
+	if err != nil {
+		return 0, apperror.Internal(err)
 	}
-	return nil
+	return n, nil
+}
+
+// ClaimOTPAttempt counts one verification attempt and reports whether the code
+// still had one left. The check and the increment are one UPDATE, so parallel
+// guesses cannot exceed maxAttempts.
+func (r *Repository) ClaimOTPAttempt(ctx context.Context, id uuid.UUID, maxAttempts int) (bool, error) {
+	res := r.db.WithContext(ctx).Model(&OTPCode{}).
+		Where("id = ? AND consumed_at IS NULL AND attempts < ?", id, maxAttempts).
+		Update("attempts", gorm.Expr("attempts + 1"))
+	if res.Error != nil {
+		return false, apperror.Internal(res.Error)
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// ConsumeOTPCode marks the code used and reports whether this call was the one
+// that did it.
+func (r *Repository) ConsumeOTPCode(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
+	res := r.db.WithContext(ctx).Model(&OTPCode{}).
+		Where("id = ? AND consumed_at IS NULL", id).
+		Update("consumed_at", at)
+	if res.Error != nil {
+		return false, apperror.Internal(res.Error)
+	}
+	return res.RowsAffected == 1, nil
 }
 
 func (r *Repository) CreateRefreshToken(ctx context.Context, t *RefreshToken) error {

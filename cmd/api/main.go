@@ -57,7 +57,7 @@ func run() error {
 	if cfg.Env == "development" {
 		gormLogLevel = gormlogger.Info
 	}
-	database, err := db.Connect(cfg.DB, gormlogger.Default.LogMode(gormLogLevel))
+	database, err := db.Connect(cfg.DB, db.NewLogger(os.Stdout, gormLogLevel, cfg.IsProduction()))
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,11 @@ func run() error {
 	}
 
 	// Booking-stage notifications stay on the stub: only OTP goes out via the provider.
-	handler, jobs := app.New(database, cfg, sms.NewStubSender(), otpSender, pushSender, fileStorage)
+	notificationSMS := sms.NewStubSender()
+	if cfg.IsProduction() {
+		notificationSMS = sms.NewRedactedStubSender()
+	}
+	handler, jobs := app.New(database, cfg, notificationSMS, otpSender, pushSender, fileStorage)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,
@@ -103,7 +107,7 @@ func run() error {
 	defer stop()
 
 	go jobs.NoShow.Run(ctx)
-	go app.NewNotificationScheduler(database, sms.NewStubSender(), pushSender, time.Minute).Run(ctx)
+	go app.NewNotificationScheduler(database, notificationSMS, pushSender, time.Minute).Run(ctx)
 
 	serveErr := make(chan error, 1)
 	go func() {

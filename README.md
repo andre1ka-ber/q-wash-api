@@ -44,7 +44,8 @@ of them via `POST /api/v1/auth/otp/request` — with the default
 `SMS_PROVIDER=stub` the OTP code is printed to the API's stdout log (`sms
 (stub, not actually sent)`), not actually sent anywhere. Set
 `SMS_PROVIDER=payom` plus the `PAYOM_*` variables in `.env.example` to send
-real SMS (only `+992` numbers are accepted by Payom).
+real SMS (only `+992` numbers are accepted by Payom). With
+`APP_ENV=production` the API refuses to start unless `SMS_PROVIDER=payom`.
 
 The admin/staff/worker accounts also get a username + password (seeded by
 `cmd/seed`, dev-only) for `POST /api/v1/auth/login` — used by the queue
@@ -152,6 +153,9 @@ over it.
 `JWT_STAFF_ACCESS_TTL` (default `5m`) is the shorter access-token life for
 staff/worker/admin accounts; `JWT_ACCESS_TTL` (15m) applies to customers.
 
+`OTP_MAX_PER_PHONE_HOUR`, `OTP_MAX_PER_PHONE_DAY` and `OTP_MAX_PER_DAY`
+(defaults 5, 10, 1000; `0` turns one off) cap how many login codes are sent.
+
 Two settings matter for a production deploy behind a reverse proxy:
 - `TRUST_PROXY_HEADERS` (default `true` outside production, `false` in
   production): set it to `true` when a single reverse proxy that sets
@@ -163,6 +167,10 @@ Two settings matter for a production deploy behind a reverse proxy:
   `RATE_LIMIT_OTP_VERIFY_PER_HOUR`, `RATE_LIMIT_QR_SCAN_PER_MINUTE`: abuse
   limits on the unauthenticated endpoints (defaults 10, 5, 15m, 5, 20, 60;
   `0` turns one off). See `docs/API.md`, "Abuse limits".
+- `RATE_LIMIT_PASSWORD_MAX_FAILURES`, `RATE_LIMIT_PASSWORD_LOCKOUT`,
+  `RATE_LIMIT_AVAILABILITY_PER_MINUTE`, `RATE_LIMIT_BOOKINGS_PER_HOUR`,
+  `RATE_LIMIT_STREAMS_PER_USER` (defaults 5, 15m, 120, 10, 10; `0` turns one
+  off): see the same section.
 
 ## Known limitations
 

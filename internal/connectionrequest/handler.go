@@ -235,7 +235,7 @@ func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_address", "address is too long (max 500 chars)"))
 		return
 	}
-	if req.BoxesCount < 0 || req.BoxesCount > maxApplyBoxes {
+	if req.BoxesCount < 0 || req.BoxesCount > washingpoint.MaxBoxesCount {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_boxes_count", "boxes_count must be between 1 and 100 when given"))
 		return
 	}
@@ -281,10 +281,6 @@ func (h *Handler) apply(w http.ResponseWriter, r *http.Request) {
 	}
 	httputil.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "received"})
 }
-
-// maxApplyBoxes caps boxes_count on the public form; the admin create path
-// is trusted and has no cap.
-const maxApplyBoxes = 100
 
 // validPhone accepts any phone with 9-15 digits (E.164 maximum is 15),
 // ignoring formatting characters like "+", spaces, dashes and brackets.
@@ -426,8 +422,8 @@ func applyEdits(c *ConnectionRequest, req updateRequest) error {
 		c.Address = nilIfEmpty(v)
 	}
 	if req.BoxesCount != nil {
-		if *req.BoxesCount < 1 {
-			return apperror.BadRequest("invalid_boxes_count", "boxes_count must be at least 1")
+		if *req.BoxesCount < 1 || *req.BoxesCount > washingpoint.MaxBoxesCount {
+			return apperror.BadRequest("invalid_boxes_count", "boxes_count must be between 1 and 100")
 		}
 		c.BoxesCount = req.BoxesCount
 	}
@@ -461,8 +457,8 @@ func validate(businessName, contactName, contactPhone, address string, boxesCoun
 	if address == "" || len(address) > 500 {
 		return apperror.BadRequest("invalid_address", "address is required (max 500 chars)")
 	}
-	if boxesCount < 1 {
-		return apperror.BadRequest("invalid_boxes_count", "boxes_count must be at least 1")
+	if boxesCount < 1 || boxesCount > washingpoint.MaxBoxesCount {
+		return apperror.BadRequest("invalid_boxes_count", "boxes_count must be between 1 and 100")
 	}
 	return nil
 }

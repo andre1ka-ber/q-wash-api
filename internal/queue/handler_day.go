@@ -78,7 +78,7 @@ func (h *Handler) listDay(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	items, err := h.toDayItems(r.Context(), rows)
+	items, err := h.toDayItems(r.Context(), washingPointID, rows)
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
@@ -96,8 +96,37 @@ func ticketPrefix(box int) string {
 	return string(rune('A'+(box-1)%26)) + "-"
 }
 
-func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemResponse, error) {
+// visibleClientNames reports whose account name the point may see: clients who
+// booked there themselves, and walk-ins who never signed in and whose first
+// booking was there. Otherwise typing any phone number into a manual booking
+// would reveal its owner's name.
+func (h *Handler) visibleClientNames(ctx context.Context, washingPointID uuid.UUID, rows []Queue, refs *rowRefs) (map[uuid.UUID]bool, error) {
+	userIDs := uniqueIDs(rows, func(q Queue) uuid.UUID { return q.UserID })
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	visible, err := h.repo.UsersBookedByThemselves(ctx, washingPointID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	firstHere, err := h.repo.UsersFirstBookedAt(ctx, washingPointID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for id := range firstHere {
+		if refs.users[id].LastLoginAt == nil {
+			visible[id] = true
+		}
+	}
+	return visible, nil
+}
+
+func (h *Handler) toDayItems(ctx context.Context, washingPointID uuid.UUID, rows []Queue) ([]dayItemResponse, error) {
 	refs, err := h.loadRefs(ctx, rows, true)
+	if err != nil {
+		return nil, err
+	}
+	nameVisible, err := h.visibleClientNames(ctx, washingPointID, rows, refs)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +199,7 @@ func (h *Handler) toDayItems(ctx context.Context, rows []Queue) ([]dayItemRespon
 		if len(lines) == 1 {
 			item.PriceOptionName = lines[0].PriceOptionName
 		}
-		if u.Name != nil {
+		if u.Name != nil && nameVisible[row.UserID] {
 			item.ClientName = *u.Name
 		}
 		if c.Plate != nil {
@@ -258,7 +287,7 @@ func (h *Handler) createManual(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, err)
 		return
 	}
-	items, err := h.toDayItems(r.Context(), []Queue{*q})
+	items, err := h.toDayItems(r.Context(), washingPointID, []Queue{*q})
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return

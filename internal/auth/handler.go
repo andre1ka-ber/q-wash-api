@@ -51,10 +51,11 @@ func (h *Handler) RegisterPublicRoutes(r chi.Router, limits PublicLimits) {
 }
 
 // RegisterAuthenticatedRoutes mounts endpoints that require a valid access
-// token. The caller must wrap r with RequireAuth.
-func (h *Handler) RegisterAuthenticatedRoutes(r chi.Router) {
+// token. The caller must wrap r with RequireAuth; passwordGuard additionally
+// wraps the password change.
+func (h *Handler) RegisterAuthenticatedRoutes(r chi.Router, passwordGuard func(http.Handler) http.Handler) {
 	r.Post("/auth/logout", h.logout)
-	r.Patch("/auth/password", h.changePassword)
+	r.With(passwordGuard).Patch("/auth/password", h.changePassword)
 }
 
 // Middleware exposes RequireAuth bound to this handler's jwt.Manager, so

@@ -23,7 +23,7 @@ type Config struct {
 	RateLimit  RateLimitConfig
 }
 
-// RateLimitConfig sets the abuse limits on the unauthenticated endpoints.
+// RateLimitConfig sets the abuse limits.
 // Per-IP limits key on the client IP, which is only meaningful when
 // HTTPConfig.TrustProxyHeaders matches the deployment (see its comment). A
 // value of 0 turns that limit off; the zero RateLimitConfig (used by tests)
@@ -35,6 +35,12 @@ type RateLimitConfig struct {
 	OTPRequestPerHour int           // POST /auth/otp/request, per IP (default 5)
 	OTPVerifyPerHour  int           // POST /auth/otp/verify, per IP (default 20)
 	QRScanPerMinute   int           // GET /q/{token} and /qr-codes/scan/{token}, per IP (default 60)
+
+	PasswordMaxFailures   int           // wrong current passwords per user before lockout (default 5)
+	PasswordLockout       time.Duration // how long that lasts (default 15m)
+	AvailabilityPerMinute int           // GET .../availability, per IP (default 120)
+	BookingsPerHour       int           // own bookings created per user (default 10)
+	StreamsPerUser        int           // open event streams per user (default 10)
 }
 
 type HTTPConfig struct {
@@ -90,6 +96,12 @@ type AuthConfig struct {
 	OTPTTL         time.Duration
 	OTPCooldown    time.Duration // minimum time between two OTP requests for the same phone
 	OTPMaxAttempts int
+	// Caps on issued codes, on top of the cooldown: per phone over the last
+	// hour and day, and across all phones per day (an SMS cost budget, counted
+	// in memory per process). 0 turns a cap off.
+	OTPMaxPerPhoneHour int
+	OTPMaxPerPhoneDay  int
+	OTPMaxPerDay       int
 
 	// ReviewPhone and ReviewOTP configure one fixed store-reviewer login
 	// (App Store / Google Play reviewers cannot receive our SMS). Both empty
@@ -149,7 +161,8 @@ const (
 func (c Config) IsProduction() bool { return c.Env == "production" }
 
 // Validate refuses to start a production deploy with unsafe configuration:
-// the built-in dev secrets, or secrets too short to be real. Other
+// the built-in dev secrets, secrets too short to be real, or the stub SMS
+// provider (it writes login codes to the log). Other
 // environments (development, test) are never blocked. CORS "*" is not a
 // startup error (a deploy may legitimately serve a public API) but is
 // reported by Warnings.
@@ -159,6 +172,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.RateLimit.validate(); err != nil {
 		return err
+	}
+	if c.Auth.OTPMaxPerPhoneHour < 0 || c.Auth.OTPMaxPerPhoneDay < 0 || c.Auth.OTPMaxPerDay < 0 {
+		return errors.New("OTP_MAX_PER_* values must not be negative (0 turns a cap off)")
 	}
 	if !c.IsProduction() {
 		return nil
@@ -176,6 +192,9 @@ func (c Config) Validate() error {
 	check("REFRESH_TOKEN_PEPPER", c.Auth.RefreshTokenPepper, devRefreshPepper)
 	if c.DB.Password == devDBPassword {
 		problems = append(problems, "DB_PASSWORD is still the built-in dev default")
+	}
+	if c.SMS.Provider != "payom" {
+		problems = append(problems, "SMS_PROVIDER must be payom (the stub only logs login codes)")
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("unsafe production configuration: %s", strings.Join(problems, "; "))
@@ -209,7 +228,9 @@ func (a AuthConfig) validateReviewLogin() error {
 // validate rejects negative limits; 0 means "off" and is allowed.
 func (r RateLimitConfig) validate() error {
 	if r.LoginPerMinute < 0 || r.LoginMaxFailures < 0 || r.LoginLockout < 0 ||
-		r.OTPRequestPerHour < 0 || r.OTPVerifyPerHour < 0 || r.QRScanPerMinute < 0 {
+		r.OTPRequestPerHour < 0 || r.OTPVerifyPerHour < 0 || r.QRScanPerMinute < 0 ||
+		r.PasswordMaxFailures < 0 || r.PasswordLockout < 0 || r.AvailabilityPerMinute < 0 ||
+		r.BookingsPerHour < 0 || r.StreamsPerUser < 0 {
 		return errors.New("RATE_LIMIT_* values must not be negative (0 turns a limit off)")
 	}
 	return nil
@@ -296,6 +317,15 @@ func Load() (Config, error) {
 	if cfg.Auth.OTPMaxAttempts, err = getInt("OTP_MAX_ATTEMPTS", 5); err != nil {
 		return Config{}, err
 	}
+	if cfg.Auth.OTPMaxPerPhoneHour, err = getInt("OTP_MAX_PER_PHONE_HOUR", 5); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.OTPMaxPerPhoneDay, err = getInt("OTP_MAX_PER_PHONE_DAY", 10); err != nil {
+		return Config{}, err
+	}
+	if cfg.Auth.OTPMaxPerDay, err = getInt("OTP_MAX_PER_DAY", 1000); err != nil {
+		return Config{}, err
+	}
 	cfg.Auth.ReviewPhone = getEnv("REVIEW_PHONE", "")
 	cfg.Auth.ReviewOTP = getEnv("REVIEW_OTP", "")
 
@@ -313,12 +343,19 @@ func Load() (Config, error) {
 		{&rl.OTPRequestPerHour, "RATE_LIMIT_OTP_REQUEST_PER_HOUR", 5},
 		{&rl.OTPVerifyPerHour, "RATE_LIMIT_OTP_VERIFY_PER_HOUR", 20},
 		{&rl.QRScanPerMinute, "RATE_LIMIT_QR_SCAN_PER_MINUTE", 60},
+		{&rl.PasswordMaxFailures, "RATE_LIMIT_PASSWORD_MAX_FAILURES", 5},
+		{&rl.AvailabilityPerMinute, "RATE_LIMIT_AVAILABILITY_PER_MINUTE", 120},
+		{&rl.BookingsPerHour, "RATE_LIMIT_BOOKINGS_PER_HOUR", 10},
+		{&rl.StreamsPerUser, "RATE_LIMIT_STREAMS_PER_USER", 10},
 	} {
 		if *f.dst, err = getInt(f.env, f.fallback); err != nil {
 			return Config{}, err
 		}
 	}
 	if rl.LoginLockout, err = getDuration("RATE_LIMIT_LOGIN_LOCKOUT", 15*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if rl.PasswordLockout, err = getDuration("RATE_LIMIT_PASSWORD_LOCKOUT", 15*time.Minute); err != nil {
 		return Config{}, err
 	}
 

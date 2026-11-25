@@ -3,19 +3,26 @@ package washingpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"q-wash-api/internal/apperror"
 	"q-wash-api/internal/auth"
 	"q-wash-api/internal/httputil"
 	"q-wash-api/internal/platform/audit"
+	"q-wash-api/internal/platform/ratelimit"
 	"q-wash-api/internal/user"
 )
+
+// MaxBoxesCount caps a point's boxes_count: availability does work per box
+// per slot, so an unbounded value could exhaust the API's memory.
+const MaxBoxesCount = 100
 
 var timeFormatRegexp = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
 
@@ -42,6 +49,8 @@ type Handler struct {
 	boxSeeder      BoxSeeder
 	userRepo       *user.Repository
 	authRepo       *auth.Repository
+	// passwordLockout is nil (no limit) unless set.
+	passwordLockout *ratelimit.Lockout
 }
 
 func NewHandler(repo *Repository, scheduleSeeder ScheduleSeeder, boxSeeder BoxSeeder, userRepo *user.Repository, authRepo *auth.Repository) *Handler {
@@ -432,9 +441,44 @@ type credentialUsernameResponse struct {
 // A role without an account is null rather than failing the whole read, so a
 // client can offer to create just the missing one (createCredentials).
 type credentialsResponse struct {
-	Staff  *credentialUsernameResponse `json:"staff"`
-	Worker *credentialUsernameResponse `json:"worker"`
+	Staff   *credentialUsernameResponse `json:"staff"`
+	Worker  *credentialUsernameResponse `json:"worker"`
+	Display *credentialUsernameResponse `json:"display"`
 }
+
+// credentialRole maps the {role} path segment to a point account role.
+func credentialRole(r *http.Request) (user.Role, error) {
+	switch role := user.Role(chi.URLParam(r, "role")); role {
+	case user.RoleStaff, user.RoleWorker, user.RoleDisplay:
+		return role, nil
+	}
+	return "", apperror.BadRequest("invalid_role", "role must be staff, worker or display")
+}
+
+type resetCredentialsRequest struct {
+	CurrentPassword string `json:"current_password"`
+}
+
+// confirmOwnPassword guards resetting the caller's own login: without the
+// current password, a stolen short-lived access token could take the account
+// over for good.
+func (h *Handler) confirmOwnPassword(r *http.Request, u *user.User) error {
+	var req resetCredentialsRequest
+	// A missing body is the same as an empty password.
+	_ = httputil.DecodeJSON(r, &req)
+	if !h.passwordLockout.Attempt(u.ID.String()) {
+		return apperror.TooManyRequests("too_many_requests", "too many wrong passwords, try again later")
+	}
+	if u.PasswordHash == nil || bcrypt.CompareHashAndPassword([]byte(*u.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		return apperror.Forbidden("current_password_required", "resetting your own login requires your current password")
+	}
+	h.passwordLockout.Reset(u.ID.String())
+	return nil
+}
+
+// SetPasswordLockout limits wrong current-password tries; pass the one the
+// auth service uses so both endpoints share a budget.
+func (h *Handler) SetPasswordLockout(l *ratelimit.Lockout) { h.passwordLockout = l }
 
 // findCredentialUsername returns the point's login username for role, or nil
 // when the point has no such account.
@@ -482,7 +526,13 @@ func (h *Handler) getCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{Staff: staff, Worker: worker})
+	display, err := h.findCredentialUsername(r.Context(), id, user.RoleDisplay)
+	if err != nil {
+		httputil.WriteError(w, r, err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, credentialsResponse{Staff: staff, Worker: worker, Display: display})
 }
 
 // createCredentials provisions the staff or worker login a point is missing
@@ -505,14 +555,9 @@ func (h *Handler) createCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var role user.Role
-	switch chi.URLParam(r, "role") {
-	case "staff":
-		role = user.RoleStaff
-	case "worker":
-		role = user.RoleWorker
-	default:
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_role", "role must be staff or worker"))
+	role, err := credentialRole(r)
+	if err != nil {
+		httputil.WriteError(w, r, err)
 		return
 	}
 
@@ -562,14 +607,9 @@ func (h *Handler) resetCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var role user.Role
-	switch chi.URLParam(r, "role") {
-	case "staff":
-		role = user.RoleStaff
-	case "worker":
-		role = user.RoleWorker
-	default:
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_role", "role must be staff or worker"))
+	role, err := credentialRole(r)
+	if err != nil {
+		httputil.WriteError(w, r, err)
 		return
 	}
 
@@ -577,6 +617,13 @@ func (h *Handler) resetCredentials(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httputil.WriteError(w, r, err)
 		return
+	}
+	if u.ID == authUser.ID {
+		if err := h.confirmOwnPassword(r, u); err != nil {
+			audit.Warn(r, "credentials.reset_refused", "actor_id", authUser.ID.String(), "washing_point_id", id.String())
+			httputil.WriteError(w, r, err)
+			return
+		}
 	}
 
 	plaintext, err := user.ResetPassword(r.Context(), h.userRepo, u)
@@ -613,8 +660,8 @@ func validate(name, address string, lat, lon float64, boxesCount int, openTime, 
 	if lon < -180 || lon > 180 {
 		return apperror.BadRequest("invalid_longitude", "longitude must be between -180 and 180")
 	}
-	if boxesCount < 1 {
-		return apperror.BadRequest("invalid_boxes_count", "boxes_count must be at least 1")
+	if boxesCount < 1 || boxesCount > MaxBoxesCount {
+		return apperror.BadRequest("invalid_boxes_count", fmt.Sprintf("boxes_count must be between 1 and %d", MaxBoxesCount))
 	}
 	if !timeFormatRegexp.MatchString(openTime) {
 		return apperror.BadRequest("invalid_open_time", "open_time must be in HH:MM 24h format")

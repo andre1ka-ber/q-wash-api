@@ -89,19 +89,87 @@ func (r *Repository) CountActiveAhead(ctx context.Context, washingPointID uuid.U
 	return int(count), nil
 }
 
-// HasActiveForUser reports whether userID already has a booking in
-// pending/queue/waiting/washing status — the app-level fast path for the
-// one-active-booking-per-user rule that queue_one_active_booking_per_user
-// (a partial unique index) enforces as the DB-level backstop.
+var activeBookingStatuses = []Status{StatusPending, StatusQueue, StatusWaiting, StatusWashing}
+
+// HasActiveForUser reports whether userID already has a booking of their own
+// (app or QR) in pending/queue/waiting/washing status — the app-level fast
+// path for the one-active-booking-per-user rule that
+// queue_one_active_booking_per_user (a partial unique index) enforces as the
+// DB-level backstop. Staff-entered manual bookings do not count: a point must
+// not be able to block a customer from booking.
 func (r *Repository) HasActiveForUser(ctx context.Context, userID uuid.UUID) (bool, error) {
 	var count int64
 	err := r.db.WithContext(ctx).Model(&Queue{}).
-		Where("user_id = ? AND status IN ?", userID, []Status{StatusPending, StatusQueue, StatusWaiting, StatusWashing}).
+		Where("user_id = ? AND status IN ? AND source <> ?", userID, activeBookingStatuses, SourceManual).
 		Count(&count).Error
 	if err != nil {
 		return false, apperror.Internal(err)
 	}
 	return count > 0, nil
+}
+
+// CountOwnCreatedSince counts the app and QR bookings userID created after
+// since, in any status.
+func (r *Repository) CountOwnCreatedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&Queue{}).
+		Where("user_id = ? AND source <> ? AND created_at > ?", userID, SourceManual, since).
+		Count(&count).Error
+	if err != nil {
+		return 0, apperror.Internal(err)
+	}
+	return count, nil
+}
+
+// HasActiveForUserAtPoint reports whether userID has any active booking at the
+// point, whatever its source — stops staff entering the same client twice.
+func (r *Repository) HasActiveForUserAtPoint(ctx context.Context, userID, washingPointID uuid.UUID) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&Queue{}).
+		Where("user_id = ? AND washing_point_id = ? AND status IN ?", userID, washingPointID, activeBookingStatuses).
+		Count(&count).Error
+	if err != nil {
+		return false, apperror.Internal(err)
+	}
+	return count > 0, nil
+}
+
+// UsersBookedByThemselves returns which of userIDs have an app or QR booking at
+// the point.
+func (r *Repository) UsersBookedByThemselves(ctx context.Context, washingPointID uuid.UUID, userIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	var ids []uuid.UUID
+	err := r.db.WithContext(ctx).Model(&Queue{}).
+		Where("washing_point_id = ? AND user_id IN ? AND source <> ?", washingPointID, userIDs, SourceManual).
+		Distinct().Pluck("user_id", &ids).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return idSet(ids), nil
+}
+
+// UsersFirstBookedAt returns which of userIDs had their earliest booking at the
+// point.
+func (r *Repository) UsersFirstBookedAt(ctx context.Context, washingPointID uuid.UUID, userIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	var ids []uuid.UUID
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT user_id FROM (
+			SELECT DISTINCT ON (user_id) user_id, washing_point_id
+			FROM queue WHERE user_id IN ?
+			ORDER BY user_id, created_at, id
+		) first_booking
+		WHERE washing_point_id = ?`, userIDs, washingPointID).Scan(&ids).Error
+	if err != nil {
+		return nil, apperror.Internal(err)
+	}
+	return idSet(ids), nil
+}
+
+func idSet(ids []uuid.UUID) map[uuid.UUID]bool {
+	set := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
 }
 
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (*Queue, error) {

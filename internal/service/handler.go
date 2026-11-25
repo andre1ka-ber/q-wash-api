@@ -13,6 +13,13 @@ import (
 	"q-wash-api/internal/washingpoint"
 )
 
+// Upper bounds: a booking is at most a day per service, and a price far above
+// any real wash is a typing error or abuse.
+const (
+	maxServiceMinutes = 24 * 60
+	maxPriceCents     = 100_000_000
+)
+
 type Handler struct {
 	repo    *Repository
 	manager *Manager
@@ -169,12 +176,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_name", "name is required (max 255 chars)"))
 		return
 	}
-	if req.DurationMinutes <= 0 {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_duration", "duration_minutes must be positive"))
+	if req.DurationMinutes <= 0 || req.DurationMinutes > maxServiceMinutes {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_duration", "duration_minutes must be between 1 and 1440"))
 		return
 	}
-	if req.QueueMinutes != nil && *req.QueueMinutes <= 0 {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be positive"))
+	if req.QueueMinutes != nil && (*req.QueueMinutes <= 0 || *req.QueueMinutes > maxServiceMinutes) {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be between 1 and 1440"))
 		return
 	}
 	if req.PictureURL != nil && len(*req.PictureURL) > 500 {
@@ -194,8 +201,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, r, apperror.BadRequest("invalid_price_option_name", "price option name is required (max 255 chars)"))
 			return
 		}
-		if po.PriceCents < 0 {
-			httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must not be negative"))
+		if po.PriceCents < 0 || po.PriceCents > maxPriceCents {
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must be between 0 and 100000000"))
 			return
 		}
 		if po.IsDefault {
@@ -282,16 +289,16 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		svc.Description = &d
 	}
 	if req.DurationMinutes != nil {
-		if *req.DurationMinutes <= 0 {
-			httputil.WriteError(w, r, apperror.BadRequest("invalid_duration", "duration_minutes must be positive"))
+		if *req.DurationMinutes <= 0 || *req.DurationMinutes > maxServiceMinutes {
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_duration", "duration_minutes must be between 1 and 1440"))
 			return
 		}
 		svc.DurationMinutes = *req.DurationMinutes
 	}
 	if req.QueueMinutes != nil {
 		switch {
-		case *req.QueueMinutes < 0:
-			httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be positive (0 clears it)"))
+		case *req.QueueMinutes < 0 || *req.QueueMinutes > maxServiceMinutes:
+			httputil.WriteError(w, r, apperror.BadRequest("invalid_queue_minutes", "queue_minutes must be between 1 and 1440 (0 clears it)"))
 			return
 		case *req.QueueMinutes == 0:
 			svc.QueueMinutes = nil
@@ -376,8 +383,8 @@ func (h *Handler) addPriceOption(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_option_name", "price option name is required (max 255 chars)"))
 		return
 	}
-	if req.PriceCents < 0 {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must not be negative"))
+	if req.PriceCents < 0 || req.PriceCents > maxPriceCents {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must be between 0 and 100000000"))
 		return
 	}
 
@@ -426,8 +433,8 @@ func (h *Handler) updatePriceOption(w http.ResponseWriter, r *http.Request) {
 		}
 		name = &trimmed
 	}
-	if req.PriceCents != nil && *req.PriceCents < 0 {
-		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must not be negative"))
+	if req.PriceCents != nil && (*req.PriceCents < 0 || *req.PriceCents > maxPriceCents) {
+		httputil.WriteError(w, r, apperror.BadRequest("invalid_price_cents", "price_cents must be between 0 and 100000000"))
 		return
 	}
 

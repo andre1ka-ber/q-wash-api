@@ -505,3 +505,17 @@ price per booking and count revenue/count per item per service. `queue.Repositor
   new `StageNotifier` method + kind `ticket_sms`), `new_point_moderation` (connection-request approval creates an `active` point when off). Defaults keep the old behavior.
   `app.New` now returns `(http.Handler, app.Jobs)`; `cmd/api` runs `jobs.NoShow`. Tests: unit `platformsettings`, `queue/rules_test.go`; integration `platform_settings_test.go`.
   Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `docs/edge-cases.md`.
+
+- 2026-11-25 — Security fixes phase 1: caps (`boxes_count` 100, service minutes 1440, `price_cents`
+  100 000 000); atomic OTP attempt counting, per-phone and global code caps (`OTP_MAX_*`); production refuses the stub SMS provider
+  and redacts the notification stub; production query logger without parameter values. Tests: integration `abuse_limits_test.go`,
+  unit `config`, `platform/db`, `platform/sms`. Docs: `API.md`, `openapi.yaml`, `README.md`, platform `docs/edge-cases.md`.
+
+- 2026-11-25 — Security fixes phase 2: migrations `000034_display_role` and `000035_manual_bookings_outside_active_limit`;
+  `display` role limited to its board; own-login credential reset needs `current_password`; manual bookings outside the
+  one-active-booking rule, with date limits, hidden foreign account names and no car rewriting. Tests: integration
+  `display_role_test.go`, `manual_queue_test.go`. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, platform `docs/edge-cases.md`.
+
+- 2026-11-25 — Rate limits on current-password checks, availability, bookings per hour and open event streams
+  (`RATE_LIMIT_*`). Tests: `ratelimit/peruser_test.go`, integration `user_limits_test.go`. Docs: `API.md`, `openapi.yaml`,
+  `README.md`, platform `docs/edge-cases.md`.

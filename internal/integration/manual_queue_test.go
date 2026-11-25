@@ -137,23 +137,103 @@ func TestQueue_ManualBookingDayListAndRestore(t *testing.T) {
 		}
 	})
 
-	t.Run("car data given for an existing client upserts their car instead of duplicating it", func(t *testing.T) {
-		if resp := env.do(t, http.MethodPatch, "/api/v1/queue/"+manualID+"/cancel", staffAccess, nil); resp.status != http.StatusOK {
-			t.Fatalf("cancel: got %d (%v)", resp.status, resp.body)
+	t.Run("a client's existing car is reused when it matches and never rewritten", func(t *testing.T) {
+		carsOf := func() []car.Car {
+			var cars []car.Car
+			if err := env.db.Joins("JOIN users ON users.id = cars.user_id").Where("users.phone_number = ?", walkInPhone).Order("cars.created_at").Find(&cars).Error; err != nil {
+				t.Fatal(err)
+			}
+			return cars
 		}
-		b := body(walkInPhone, 1, futureBookingTime(9))
-		b["car_name"] = "Toyota Camry 2020"
-		b["plate"] = "1234 ab 01"
-		resp := env.do(t, http.MethodPost, manualPath, staffAccess, b)
-		if resp.status != http.StatusCreated {
-			t.Fatalf("expected 201, got %d (%v)", resp.status, resp.body)
+		cancel := func(id string) {
+			if c := env.do(t, http.MethodPatch, "/api/v1/queue/"+id+"/cancel", staffAccess, nil); c.status != http.StatusOK {
+				t.Fatalf("cancel: got %d (%v)", c.status, c.body)
+			}
 		}
-		var cars []car.Car
-		if err := env.db.Joins("JOIN users ON users.id = cars.user_id").Where("users.phone_number = ?", walkInPhone).Find(&cars).Error; err != nil {
-			t.Fatal(err)
+		book := func(day int, name, plate string) {
+			b := body(walkInPhone, 1, futureBookingTime(day))
+			b["car_name"], b["plate"] = name, plate
+			resp := env.do(t, http.MethodPost, manualPath, staffAccess, b)
+			if resp.status != http.StatusCreated {
+				t.Fatalf("expected 201, got %d (%v)", resp.status, resp.body)
+			}
+			cancel(resp.str("id"))
 		}
-		if len(cars) != 1 || cars[0].Name != "Toyota Camry 2020" {
-			t.Fatalf("expected the one existing car renamed, got %+v", cars)
+		cancel(manualID)
+		book(9, "toyota camry", "1234 ab 01")
+		if cars := carsOf(); len(cars) != 1 {
+			t.Fatalf("a matching car must be reused, got %+v", cars)
+		}
+		book(10, "Toyota Camry 2020", "1234 AB 01")
+		cars := carsOf()
+		if len(cars) != 2 || cars[0].Name != "Toyota Camry" || cars[1].Name != "Toyota Camry 2020" {
+			t.Fatalf("expected the old car untouched and a new one, got %+v", cars)
+		}
+	})
+}
+
+func TestQueue_ManualBookingLimits(t *testing.T) {
+	env := newTestEnv(t)
+	staffPhone := uniquePhone(970)
+	env.loginAs(t, staffPhone, user.RoleStaff)
+	otherStaffPhone := uniquePhone(971)
+	env.loginAs(t, otherStaffPhone, user.RoleStaff)
+	admin := env.loginAs(t, uniquePhone(972), user.RoleAdmin)
+	customerPhone := uniquePhone(973)
+	customer := env.loginAs(t, customerPhone, "")
+	if resp := env.do(t, http.MethodPatch, "/api/v1/me", customer, map[string]string{"name": "Private Name"}); resp.status != http.StatusOK {
+		t.Fatalf("set name: %d", resp.status)
+	}
+	here := env.setUpBookingFixture(t, admin, staffPhone)
+	there := env.setUpBookingFixture(t, admin, otherStaffPhone)
+
+	manual := func(fx bookingFixture, phone, start string) apiResponse {
+		return env.do(t, http.MethodPost, "/api/v1/washing-points/"+fx.washingPointID+"/queue/manual", fx.staffAccess, map[string]any{
+			"service_id": fx.serviceID, "price_option_id": fx.priceOptionID, "box_number": 1,
+			"scheduled_start_at": start, "client_phone": phone,
+		})
+	}
+
+	t.Run("start must be within the last day and the next 60 days", func(t *testing.T) {
+		for _, day := range []int{-3, 62} {
+			resp := manual(here, uniquePhone(974), futureBookingTime(day))
+			errBody, _ := resp.body["error"].(map[string]any)
+			if resp.status != http.StatusBadRequest || errBody["code"] != "invalid_scheduled_start_at" {
+				t.Errorf("day %d: expected 400 invalid_scheduled_start_at, got %d (%v)", day, resp.status, resp.body)
+			}
+		}
+	})
+
+	t.Run("a point does not learn the name of a client it never served", func(t *testing.T) {
+		resp := manual(here, customerPhone, futureBookingTime(3))
+		if resp.status != http.StatusCreated || resp.str("client_name") != "" {
+			t.Fatalf("expected 201 without the account name, got %d (%v)", resp.status, resp.body)
+		}
+	})
+
+	t.Run("manual bookings do not take the client's one active booking", func(t *testing.T) {
+		if resp := manual(there, customerPhone, futureBookingTime(4)); resp.status != http.StatusCreated {
+			t.Fatalf("another point's manual booking: got %d (%v)", resp.status, resp.body)
+		}
+		carResp := env.do(t, http.MethodPost, "/api/v1/me/cars", customer, map[string]string{"name": "Mine"})
+		own := map[string]any{
+			"car_id": carResp.str("id"), "service_id": here.serviceID, "price_option_id": here.priceOptionID,
+			"box_number": 1, "scheduled_start_at": futureBookingTime(5),
+		}
+		if resp := env.do(t, http.MethodPost, "/api/v1/queue", customer, own); resp.status != http.StatusCreated {
+			t.Fatalf("the client's own booking: got %d (%v)", resp.status, resp.body)
+		}
+		own["scheduled_start_at"] = futureBookingTime(6)
+		if resp := env.do(t, http.MethodPost, "/api/v1/queue", customer, own); resp.status != http.StatusConflict {
+			t.Fatalf("a second app booking: expected 409, got %d", resp.status)
+		}
+	})
+
+	t.Run("once the client books in the app, the point sees the name", func(t *testing.T) {
+		day := env.do(t, http.MethodGet, "/api/v1/washing-points/"+here.washingPointID+"/queue/day?date="+futureBookingDate(5), here.staffAccess, nil)
+		items, _ := day.body["items"].([]any)
+		if len(items) != 1 || items[0].(map[string]any)["client_name"] != "Private Name" {
+			t.Fatalf("expected the name for an app booking, got %v", day.body)
 		}
 	})
 }

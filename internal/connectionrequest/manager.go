@@ -72,6 +72,11 @@ func (m *Manager) Approve(ctx context.Context, id, reviewerID uuid.UUID) (*Conne
 		return nil, nil, user.PointAccounts{}, apperror.Conflict("connection_request_incomplete", "address and boxes_count must be filled in before approving")
 	}
 
+	// Rows stored before the cap existed must not create an oversized point.
+	if *cr.BoxesCount > washingpoint.MaxBoxesCount {
+		return nil, nil, user.PointAccounts{}, apperror.Conflict("connection_request_incomplete", "boxes_count must be between 1 and 100 before approving")
+	}
+
 	own, err := m.ownerRepo.FindByPhone(ctx, cr.ContactPhone)
 	if err != nil {
 		return nil, nil, user.PointAccounts{}, err

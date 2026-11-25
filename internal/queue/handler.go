@@ -50,21 +50,28 @@ func NewHandler(
 	return &Handler{repo: repo, manager: manager, wpRepo: wpRepo, serviceRepo: serviceRepo, userRepo: userRepo, carRepo: carRepo, scheduleRepo: scheduleRepo, boxRepo: boxRepo, bus: bus}
 }
 
+// Limits are the abuse limits on queue routes; both must be set
+// (ratelimit.Passthrough to turn one off). Streams runs after authentication.
+type Limits struct {
+	Availability func(http.Handler) http.Handler
+	Streams      func(http.Handler) http.Handler
+}
+
 // RegisterRoutes mounts availability (public), booking create/get/cancel
 // (any authenticated user, ownership enforced internally), the staff-only
 // network-wide board + notification-adjacent surface (requireStaff:
 // staff/admin), the per-point live board/status/pause/resume/live-boxes
 // surface (requireQueueOps: staff/worker/admin, docs/PLAN_WEB_APPS.md
 // phase 7 — worker needs these but not the staff-only ones), and the
-// lobby-display board summary (requireStaff, phase 8 — the display kiosk
-// logs in as staff/admin, not a new role; worker doesn't need this one).
+// lobby-display board summary (requireBoard: staff/admin and the display
+// role the kiosk logs in with).
 // Everything for a given path prefix is registered in one Route() call
 // with per-method middleware via chi's With(...) — see the note in
 // washingpoint.Handler.RegisterRoutes for why (chi panics if the same
 // prefix is Mount()ed from two separate calls).
-func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) http.Handler, requireStaff, requireQueueOps []func(http.Handler) http.Handler) {
+func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) http.Handler, requireStaff, requireQueueOps, requireBoard []func(http.Handler) http.Handler, limits Limits) {
 	r.Route("/washing-points/{id}/availability", func(av chi.Router) {
-		av.Get("/", h.availability)
+		av.With(limits.Availability).Get("/", h.availability)
 	})
 
 	r.Route("/washing-points/{id}/queue", func(board chi.Router) {
@@ -79,8 +86,8 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 	})
 
 	r.Route("/washing-points/{id}/board", func(brd chi.Router) {
-		brd.With(requireStaff...).Get("/", h.board)
-		brd.With(requireStaff...).Get("/events", h.boardEvents)
+		brd.With(requireBoard...).Get("/", h.board)
+		brd.With(requireBoard...).With(limits.Streams).Get("/events", h.boardEvents)
 	})
 
 	r.Route("/washing-points/{id}/reports", func(rep chi.Router) {
@@ -91,7 +98,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, requireAuth func(http.Handler) ht
 		q.With(requireStaff...).Get("/", h.list)
 		q.With(requireAuth).Post("/", h.create)
 		q.With(requireAuth).Get("/{id}", h.get)
-		q.With(requireAuth).Get("/{id}/events", h.events)
+		q.With(requireAuth, limits.Streams).Get("/{id}/events", h.events)
 		q.With(requireAuth).Patch("/{id}/cancel", h.cancel)
 		q.With(requireStaff...).Patch("/{id}/confirm", h.confirm)
 		q.With(requireStaff...).Patch("/{id}/reject", h.reject)

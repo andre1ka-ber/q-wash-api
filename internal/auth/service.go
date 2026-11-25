@@ -119,7 +119,18 @@ type Service struct {
 	// loginLockout locks a username after repeated wrong passwords. nil
 	// (the default) means no lockout.
 	loginLockout *ratelimit.Lockout
+
+	// passwordLockout is shared with the own-login credential reset.
+	passwordLockout *ratelimit.Lockout
+
+	// otpBudget caps codes sent per day across all phones (SMS cost). nil
+	// means no cap.
+	otpBudget *ratelimit.Limiter
 }
+
+// SetPasswordLockout limits wrong current-password tries per user, so a
+// stolen access token cannot be used to guess the password.
+func (s *Service) SetPasswordLockout(l *ratelimit.Lockout) { s.passwordLockout = l }
 
 // SetLoginLockout enables the per-username lockout on password login.
 func (s *Service) SetLoginLockout(l *ratelimit.Lockout) { s.loginLockout = l }
@@ -141,7 +152,11 @@ func burnPasswordCompare(password string) {
 }
 
 func NewService(repo *Repository, userRepo *user.Repository, otpSender sms.OTPSender, jwtManager *jwt.Manager, cfg config.AuthConfig) *Service {
-	return &Service{repo: repo, userRepo: userRepo, sms: otpSender, jwtManager: jwtManager, cfg: cfg, now: time.Now}
+	s := &Service{repo: repo, userRepo: userRepo, sms: otpSender, jwtManager: jwtManager, cfg: cfg, now: time.Now}
+	if cfg.OTPMaxPerDay > 0 {
+		s.otpBudget = ratelimit.New(cfg.OTPMaxPerDay, 24*time.Hour)
+	}
+	return s
 }
 
 func (s *Service) isReviewPhone(phone string) bool {
@@ -174,21 +189,14 @@ func (s *Service) verifyReviewOTP(code string) error {
 
 // RequestOTP generates a one-time code, stores its hash, and "sends" it via
 // the configured sms.OTPSender (a stdout stub in dev). It's rate-limited per
-// phone number by cfg.OTPCooldown.
+// phone number by cfg.OTPCooldown and the hourly and daily caps, and across
+// all phones by the daily budget; every refusal is 429 otp_cooldown.
 func (s *Service) RequestOTP(ctx context.Context, phone string) error {
 	if err := ValidatePhoneNumber(phone); err != nil {
 		return err
 	}
 	if s.isReviewPhone(phone) {
 		return nil
-	}
-
-	latest, err := s.repo.LatestActiveOTPCode(ctx, phone)
-	if err != nil {
-		return err
-	}
-	if latest != nil && time.Since(latest.CreatedAt) < s.cfg.OTPCooldown {
-		return apperror.TooManyRequests("otp_cooldown", "please wait before requesting another code")
 	}
 
 	code, err := generateOTPCode()
@@ -205,12 +213,57 @@ func (s *Service) RequestOTP(ctx context.Context, phone string) error {
 		CodeHash:    string(hash),
 		ExpiresAt:   time.Now().Add(s.cfg.OTPTTL),
 	}
-	if err := s.repo.CreateOTPCode(ctx, otp); err != nil {
+	err = s.repo.WithPhoneLock(ctx, phone, func(repo *Repository) error {
+		if err := s.checkOTPLimits(ctx, repo, phone); err != nil {
+			return err
+		}
+		return repo.CreateOTPCode(ctx, otp)
+	})
+	if err != nil {
 		return err
 	}
 
 	if err := s.sms.SendOTP(ctx, phone, code, s.cfg.OTPTTL); err != nil {
 		return apperror.Internal(err)
+	}
+	return nil
+}
+
+// checkOTPLimits applies the cooldown, the per-phone caps and the global
+// budget. The budget is checked last so a refused phone does not use it up.
+func (s *Service) checkOTPLimits(ctx context.Context, repo *Repository, phone string) error {
+	latest, err := repo.LatestActiveOTPCode(ctx, phone)
+	if err != nil {
+		return err
+	}
+	if latest != nil && time.Since(latest.CreatedAt) < s.cfg.OTPCooldown {
+		return apperror.TooManyRequests("otp_cooldown", "please wait before requesting another code")
+	}
+
+	for _, limit := range []struct {
+		max    int
+		window time.Duration
+	}{
+		{s.cfg.OTPMaxPerPhoneHour, time.Hour},
+		{s.cfg.OTPMaxPerPhoneDay, 24 * time.Hour},
+	} {
+		if limit.max <= 0 {
+			continue
+		}
+		issued, err := repo.CountOTPCodesSince(ctx, phone, time.Now().Add(-limit.window))
+		if err != nil {
+			return err
+		}
+		if issued >= int64(limit.max) {
+			return apperror.TooManyRequests("otp_cooldown", "too many codes requested for this phone number, try again later")
+		}
+	}
+
+	if s.otpBudget != nil {
+		if ok, _ := s.otpBudget.Allow("all"); !ok {
+			slog.WarnContext(ctx, "audit", "event", "auth.otp_budget_exhausted")
+			return apperror.TooManyRequests("otp_cooldown", "codes cannot be sent right now, try again later")
+		}
 	}
 	return nil
 }
@@ -254,19 +307,25 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code string) (*TokenPair
 		return nil, apperror.TooManyRequests("otp_locked", "too many incorrect attempts, request a new code")
 	}
 
-	otp.Attempts++
-	correct := bcrypt.CompareHashAndPassword([]byte(otp.CodeHash), []byte(code)) == nil
-	if !correct {
-		if err := s.repo.SaveOTPCode(ctx, otp); err != nil {
-			return nil, err
-		}
+	// The attempt is counted before the code is compared.
+	claimed, err := s.repo.ClaimOTPAttempt(ctx, otp.ID, s.cfg.OTPMaxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, apperror.TooManyRequests("otp_locked", "too many incorrect attempts, request a new code")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(otp.CodeHash), []byte(code)) != nil {
 		return nil, apperror.BadRequest("otp_invalid", "incorrect code")
 	}
 
 	now := time.Now()
-	otp.ConsumedAt = &now
-	if err := s.repo.SaveOTPCode(ctx, otp); err != nil {
+	consumed, err := s.repo.ConsumeOTPCode(ctx, otp.ID, now)
+	if err != nil {
 		return nil, err
+	}
+	if !consumed {
+		return nil, apperror.BadRequest("otp_invalid", "no active code for this phone number, request a new one")
 	}
 
 	return s.loginByPhone(ctx, phone, now)
@@ -349,8 +408,8 @@ func (s *Service) LoginWithPassword(ctx context.Context, username, password stri
 	}
 	s.loginLockout.Reset(lockKey)
 
-	if u.Role != user.RoleStaff && u.Role != user.RoleAdmin && u.Role != user.RoleWorker {
-		return nil, apperror.Forbidden("forbidden", "username/password login is only available to staff, worker, and admin accounts")
+	if u.Role != user.RoleStaff && u.Role != user.RoleAdmin && u.Role != user.RoleWorker && u.Role != user.RoleDisplay {
+		return nil, apperror.Forbidden("forbidden", "username/password login is only available to staff, worker, display, and admin accounts")
 	}
 
 	now := time.Now()
@@ -382,9 +441,13 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, currentP
 	if u.PasswordHash == nil {
 		return nil, apperror.Forbidden("forbidden", "this account has no password login")
 	}
+	if !s.passwordLockout.Attempt(u.ID.String()) {
+		return nil, apperror.TooManyRequests("too_many_requests", "too many wrong passwords, try again later")
+	}
 	if bcrypt.CompareHashAndPassword([]byte(*u.PasswordHash), []byte(currentPassword)) != nil {
 		return nil, apperror.Unauthorized("invalid_credentials", "current password is incorrect")
 	}
+	s.passwordLockout.Reset(u.ID.String())
 	if err := ValidatePasswordPolicy(newPassword); err != nil {
 		return nil, err
 	}

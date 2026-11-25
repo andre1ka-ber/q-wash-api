@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"q-wash-api/internal/platform/audit"
 )
 
 type Sender interface {
@@ -29,11 +31,19 @@ func OTPMessage(code string, ttl time.Duration) string {
 	return fmt.Sprintf("QWash: код подтверждения %s. Действует %d мин.", code, int(ttl.Minutes()))
 }
 
-type StubSender struct{}
+type StubSender struct{ redact bool }
 
 func NewStubSender() *StubSender { return &StubSender{} }
 
+// NewRedactedStubSender is the stub for production: it records that a message
+// would have gone out without logging its text or the full phone number.
+func NewRedactedStubSender() *StubSender { return &StubSender{redact: true} }
+
 func (s *StubSender) Send(ctx context.Context, phoneNumber, message string) error {
+	if s.redact {
+		slog.InfoContext(ctx, "sms (stub, not actually sent)", "to", audit.MaskPhone(phoneNumber))
+		return nil
+	}
 	slog.InfoContext(ctx, "sms (stub, not actually sent)", "to", phoneNumber, "message", message)
 	return nil
 }

@@ -37,6 +37,27 @@ type Manager struct {
 	bus          *eventbus.Bus
 	notifier     StageNotifier
 	settings     platformsettings.Provider
+	// bookingsPerHour caps the bookings a user creates for themselves; 0 means
+	// no cap.
+	bookingsPerHour int
+}
+
+// SetBookingsPerHour caps how many bookings a user may create per hour,
+// canceled ones included, so book-and-cancel churn cannot disrupt a point.
+func (m *Manager) SetBookingsPerHour(n int) { m.bookingsPerHour = n }
+
+func (m *Manager) checkBookingRate(ctx context.Context, userID uuid.UUID) error {
+	if m.bookingsPerHour <= 0 {
+		return nil
+	}
+	created, err := m.repo.CountOwnCreatedSince(ctx, userID, time.Now().Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	if created >= int64(m.bookingsPerHour) {
+		return apperror.TooManyRequests("too_many_requests", "too many bookings, try again later")
+	}
+	return nil
 }
 
 // StageNotifier is told after a booking's status changes so the customer can
@@ -259,6 +280,12 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 		return nil, apperror.Conflict("active_booking_exists", "you already have an active booking")
 	}
 
+	// Counted from stored bookings; the one-active-booking index keeps parallel
+	// requests from slipping several past this check.
+	if err := m.checkBookingRate(ctx, in.UserID); err != nil {
+		return nil, err
+	}
+
 	if err := m.checkHorizon(ctx, in.ScheduledStartAt); err != nil {
 		return nil, err
 	}
@@ -296,6 +323,9 @@ func (m *Manager) CreateBooking(ctx context.Context, in CreateBookingInput) (*Qu
 	return q, nil
 }
 
+// manualBookingPast is how far back staff may date a walk-in.
+const manualBookingPast = 24 * time.Hour
+
 type CreateManualBookingInput struct {
 	WashingPointID uuid.UUID
 	Items          []BookingItem
@@ -313,15 +343,20 @@ type CreateManualBookingInput struct {
 
 // CreateManualBooking is the cabinet's "Добавить вручную": a staff-created
 // walk-in booking. The client is found-or-created by phone as a regular
-// customer user, and their car (if any) is upserted — created inside
+// customer user, and their car (if any) is found or created — inside
 // the booking's transaction so a lost slot race leaves nothing behind.
-// Car name/plate are optional; when given, the client's car is upserted
-// (matched by plate, else by name) instead of always creating a new one. An
-// existing account with a non-customer role (staff/worker/admin) is
+// Car name/plate are optional; an existing car matching both is reused and
+// never rewritten. The start must be within the last 24 hours or the next
+// platformsettings.MaxHorizonDays days. An existing account with a non-customer role (staff/worker/admin) is
 // rejected rather than booked against. Always starts in StatusQueue.
 // With in.Overflow the booking goes into the virtual out-of-queue box
 // (BoxNumber 0, IsOverflow) and skips box availability checks.
 func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookingInput) (*Queue, error) {
+	now := time.Now()
+	if in.ScheduledStartAt.Before(now.Add(-manualBookingPast)) || in.ScheduledStartAt.After(now.AddDate(0, 0, platformsettings.MaxHorizonDays)) {
+		return nil, apperror.BadRequest("invalid_scheduled_start_at", fmt.Sprintf("scheduled_start_at must be within the last 24 hours or the next %d days", platformsettings.MaxHorizonDays))
+	}
+
 	plan, err := m.planBooking(ctx, in.Items, in.BoxNumber, in.ScheduledStartAt, false, in.Overflow, &in.WashingPointID)
 	if err != nil {
 		return nil, err
@@ -363,16 +398,16 @@ func (m *Manager) CreateManualBooking(ctx context.Context, in CreateManualBookin
 			return apperror.Conflict("phone_not_customer", "this phone number belongs to a staff account")
 		}
 
-		hasActive, err := m.repo.WithTx(tx).HasActiveForUser(ctx, u.ID)
+		hasActive, err := m.repo.WithTx(tx).HasActiveForUserAtPoint(ctx, u.ID, plan.wp.ID)
 		if err != nil {
 			return err
 		}
 		if hasActive {
-			return apperror.Conflict("active_booking_exists", "this client already has an active booking")
+			return apperror.Conflict("active_booking_exists", "this client already has an active booking at this washing point")
 		}
 
 		if in.CarName != "" || in.Plate != "" {
-			c, err := car.NewRepository(tx).UpsertForUser(ctx, u.ID, in.CarName, in.Plate)
+			c, err := car.NewRepository(tx).FindOrCreateForUser(ctx, u.ID, in.CarName, in.Plate)
 			if err != nil {
 				return err
 			}

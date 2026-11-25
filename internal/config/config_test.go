@@ -11,6 +11,7 @@ const goodSecret = "0123456789abcdef0123456789abcdef" // 32 chars
 func production() Config {
 	return Config{
 		Env:  "production",
+		SMS:  SMSConfig{Provider: "payom"},
 		Auth: AuthConfig{AccessTokenSecret: goodSecret, RefreshTokenPepper: goodSecret + "x"},
 	}
 }
@@ -109,8 +110,43 @@ func TestLoadAppliesValidation(t *testing.T) {
 	}
 
 	t.Setenv("DB_PASSWORD", "a-real-database-password")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load must fail for production with the stub SMS provider")
+	}
+
+	t.Setenv("SMS_PROVIDER", "payom")
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load with real secrets: %v", err)
+	}
+}
+
+func TestValidate_SMSProvider(t *testing.T) {
+	for _, provider := range []string{"", "stub", "Payom"} {
+		c := production()
+		c.SMS.Provider = provider
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "SMS_PROVIDER") {
+			t.Errorf("production with provider %q: expected an SMS_PROVIDER error, got %v", provider, err)
+		}
+		c.Env = "development"
+		if err := c.Validate(); err != nil {
+			t.Errorf("development with provider %q: %v", provider, err)
+		}
+	}
+}
+
+func TestLoadOTPCaps(t *testing.T) {
+	cfg, err := Load()
+	if err != nil || cfg.Auth.OTPMaxPerPhoneHour != 5 || cfg.Auth.OTPMaxPerPhoneDay != 10 || cfg.Auth.OTPMaxPerDay != 1000 {
+		t.Fatalf("defaults: %+v err=%v", cfg.Auth, err)
+	}
+
+	t.Setenv("OTP_MAX_PER_DAY", "0")
+	if cfg, err = Load(); err != nil || cfg.Auth.OTPMaxPerDay != 0 {
+		t.Fatalf("0 turns a cap off: %+v err=%v", cfg.Auth, err)
+	}
+	t.Setenv("OTP_MAX_PER_PHONE_DAY", "-1")
+	if _, err = Load(); err == nil {
+		t.Fatal("a negative cap must be refused")
 	}
 }
 
@@ -125,6 +161,7 @@ func TestLoadProxyTrustAndRateLimits(t *testing.T) {
 		t.Setenv("JWT_ACCESS_SECRET", goodSecret)
 		t.Setenv("REFRESH_TOKEN_PEPPER", goodSecret)
 		t.Setenv("DB_PASSWORD", "a-real-database-password")
+		t.Setenv("SMS_PROVIDER", "payom")
 		cfg, err = Load()
 		if err != nil || cfg.HTTP.TrustProxyHeaders {
 			t.Fatalf("production: trust=%v err=%v", cfg.HTTP.TrustProxyHeaders, err)
@@ -149,7 +186,8 @@ func TestLoadProxyTrustAndRateLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := RateLimitConfig{LoginPerMinute: 10, LoginMaxFailures: 5, LoginLockout: 15 * time.Minute, OTPRequestPerHour: 5, OTPVerifyPerHour: 20, QRScanPerMinute: 60}
+		want := RateLimitConfig{LoginPerMinute: 10, LoginMaxFailures: 5, LoginLockout: 15 * time.Minute, OTPRequestPerHour: 5, OTPVerifyPerHour: 20, QRScanPerMinute: 60,
+			PasswordMaxFailures: 5, PasswordLockout: 15 * time.Minute, AvailabilityPerMinute: 120, BookingsPerHour: 10, StreamsPerUser: 10}
 		if cfg.RateLimit != want {
 			t.Fatalf("got %+v, want %+v", cfg.RateLimit, want)
 		}

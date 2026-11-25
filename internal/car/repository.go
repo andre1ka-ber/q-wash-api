@@ -70,35 +70,20 @@ func (r *Repository) Update(ctx context.Context, c *Car) error {
 	return nil
 }
 
-// UpsertForUser finds the user's car by plate (case-insensitive) when one
-// is given, else by name, and fills in whichever of name/plate were
-// provided; otherwise it creates a new car (name falls back to the plate
-// when only a plate was given, since cars.name is NOT NULL). At least one
-// of name/plate must be non-empty.
-func (r *Repository) UpsertForUser(ctx context.Context, userID uuid.UUID, name, plate string) (*Car, error) {
-	q := r.db.WithContext(ctx).Where("user_id = ?", userID)
-	if plate != "" {
-		q = q.Where("lower(plate) = lower(?)", plate)
-	} else {
-		q = q.Where("lower(name) = lower(?)", name)
+// FindOrCreateForUser returns the user's car with this name and plate
+// (case-insensitive), creating it when there is none. An existing car is never
+// rewritten: staff entering a walk-in must not rename or re-plate a customer's
+// car. The name falls back to the plate when only a plate was given, since
+// cars.name is NOT NULL. At least one of name/plate must be non-empty.
+func (r *Repository) FindOrCreateForUser(ctx context.Context, userID uuid.UUID, name, plate string) (*Car, error) {
+	if name == "" {
+		name = plate
 	}
 	var existing Car
-	err := q.Order("created_at").First(&existing).Error
+	err := r.db.WithContext(ctx).
+		Where("user_id = ? AND lower(name) = lower(?) AND lower(coalesce(plate, '')) = lower(?)", userID, name, plate).
+		Order("created_at").First(&existing).Error
 	if err == nil {
-		updates := map[string]any{}
-		if name != "" && name != existing.Name {
-			updates["name"] = name
-			existing.Name = name
-		}
-		if plate != "" && (existing.Plate == nil || *existing.Plate != plate) {
-			updates["plate"] = plate
-			existing.Plate = &plate
-		}
-		if len(updates) > 0 {
-			if err := r.db.WithContext(ctx).Model(&Car{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-				return nil, apperror.Internal(err)
-			}
-		}
 		return &existing, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -106,9 +91,6 @@ func (r *Repository) UpsertForUser(ctx context.Context, userID uuid.UUID, name, 
 	}
 
 	c := &Car{UserID: userID, Name: name}
-	if c.Name == "" {
-		c.Name = plate
-	}
 	if plate != "" {
 		c.Plate = &plate
 	}

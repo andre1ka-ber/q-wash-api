@@ -56,10 +56,13 @@ func (l *Lockout) Fail(key string) {
 	if l == nil {
 		return
 	}
-	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.failLocked(key, l.now())
+}
 
+// failLocked records a failure; l.mu must be held.
+func (l *Lockout) failLocked(key string, now time.Time) {
 	// Opportunistic sweep so a flood of distinct keys (including made-up
 	// usernames) cannot grow the map without bound.
 	if len(l.entries) > 10000 {
@@ -81,6 +84,24 @@ func (l *Lockout) Fail(key string) {
 		e.failures = 0
 		e.lockedUntil = now.Add(l.duration)
 	}
+}
+
+// Attempt reports whether key may try now and, if so, counts the try as a
+// failure up front; call Reset when it succeeds. Check and count happen under
+// one lock, so parallel tries cannot exceed the limit, unlike Locked followed
+// by Fail.
+func (l *Lockout) Attempt(key string) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if e, ok := l.entries[key]; ok && now.Before(e.lockedUntil) {
+		return false
+	}
+	l.failLocked(key, now)
+	return true
 }
 
 // Reset clears key's failure count (call after a successful login).

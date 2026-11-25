@@ -155,9 +155,9 @@ func (r *AnalyticsRepository) washActivities(ctx context.Context, since7d, dayEn
 		  (SELECT COUNT(*) FROM users u
 		     WHERE u.washing_point_id = wp.id AND u.role IN ('staff', 'worker') AND u.username IS NOT NULL) AS staff,
 		  (SELECT COUNT(*) FROM login_events e
-		     WHERE e.washing_point_id = wp.id AND e.created_at >= ?) AS sessions7d,
+		     WHERE e.washing_point_id = wp.id AND e.role <> 'display' AND e.created_at >= ?) AS sessions7d,
 		  (SELECT COUNT(DISTINCT (e.created_at AT TIME ZONE 'Asia/Dushanbe')::date) FROM login_events e
-		     WHERE e.washing_point_id = wp.id AND e.created_at >= ?) AS active_days7d,
+		     WHERE e.washing_point_id = wp.id AND e.role <> 'display' AND e.created_at >= ?) AS active_days7d,
 		  (SELECT COUNT(*) FROM queue q
 		     WHERE q.washing_point_id = wp.id AND q.status NOT IN ('canceled', 'no_show')
 		       AND q.scheduled_start_at >= ? AND q.scheduled_start_at < ?) AS bookings7d
@@ -175,7 +175,7 @@ func (r *AnalyticsRepository) washActivities(ctx context.Context, since7d, dayEn
 	}
 	err = r.db.WithContext(ctx).Raw(`
 		SELECT DISTINCT ON (washing_point_id) washing_point_id, role, platform
-		FROM login_events WHERE washing_point_id IS NOT NULL
+		FROM login_events WHERE washing_point_id IS NOT NULL AND role <> 'display'
 		ORDER BY washing_point_id, created_at DESC`).Scan(&last).Error
 	if err != nil {
 		return nil, apperror.Internal(err)

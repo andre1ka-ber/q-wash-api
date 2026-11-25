@@ -17,6 +17,9 @@ const (
 	// WashingPointID below. Logs in the same way staff/admin do (see
 	// docs/PLAN_WEB_APPS.md) — not yet wired to any endpoint.
 	RoleWorker Role = "worker"
+	// RoleDisplay is a point's lobby screen: scoped like a worker, but it can
+	// only read that point's board (see app.New's route gates).
+	RoleDisplay Role = "display"
 )
 
 type User struct {

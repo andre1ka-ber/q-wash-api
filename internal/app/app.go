@@ -77,6 +77,9 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	authRepo := auth.NewRepository(database)
 	authService := auth.NewService(authRepo, userRepo, otpSender, jwtManager, cfg.Auth)
 	authService.SetLoginLockout(ratelimit.NewLockout(cfg.RateLimit.LoginMaxFailures, cfg.RateLimit.LoginLockout))
+	// One budget for every endpoint that checks a signed-in user's password.
+	passwordLockout := ratelimit.NewLockout(cfg.RateLimit.PasswordMaxFailures, cfg.RateLimit.PasswordLockout)
+	authService.SetPasswordLockout(passwordLockout)
 	authHandler := auth.NewHandler(authService, jwtManager)
 
 	wpRepo := washingpoint.NewRepository(database)
@@ -92,6 +95,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	boxHandler := box.NewHandler(boxRepo, boxManager, queueBus)
 
 	wpHandler := washingpoint.NewHandler(wpRepo, scheduleManager, boxManager, userRepo, authRepo)
+	wpHandler.SetPasswordLockout(passwordLockout)
 
 	serviceRepo := service.NewRepository(database)
 	serviceManager := service.NewManager(serviceRepo)
@@ -103,6 +107,7 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	queueRepo := queue.NewRepository(database)
 	queueManager := queue.NewManager(database, queueRepo, carRepo, serviceRepo, wpRepo, scheduleRepo, boxRepo, queueBus)
 	queueManager.SetSettings(settingsRepo)
+	queueManager.SetBookingsPerHour(cfg.RateLimit.BookingsPerHour)
 	queueHandler := queue.NewHandler(queueRepo, queueManager, wpRepo, serviceRepo, userRepo, carRepo, scheduleRepo, boxRepo, queueBus)
 
 	deviceRepo := device.NewRepository(database)
@@ -136,7 +141,16 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	qrCodeManager := qrcode.NewManager(qrCodeRepo, wpRepo, queueRepo)
 	qrCodeHandler := qrcode.NewHandler(qrCodeRepo, qrCodeManager, wpRepo)
 
-	requireAuth := authHandler.Middleware()
+	authenticate := authHandler.Middleware()
+	// A display account is signed in on an unattended screen, so every
+	// authenticated route refuses it unless it opts in (requireBoard, /me and
+	// logout below).
+	notDisplay := auth.ForbidRole(string(user.RoleDisplay))
+	requireAuth := func(next http.Handler) http.Handler { return authenticate(notDisplay(next)) }
+	requireBoard := []func(http.Handler) http.Handler{
+		authenticate,
+		auth.RequireRole(string(user.RoleStaff), string(user.RoleAdmin), string(user.RoleDisplay)),
+	}
 	requireStaff := []func(http.Handler) http.Handler{
 		requireAuth,
 		auth.RequireRole(string(user.RoleStaff), string(user.RoleAdmin)),
@@ -167,7 +181,11 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	})
 	wpHandler.RegisterRoutes(v1, requireStaff...)
 	serviceHandler.RegisterRoutes(v1, requireStaff...)
-	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps)
+	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps, requireBoard, queue.Limits{
+		Availability: ratelimit.PerIP(rl.AvailabilityPerMinute, time.Minute),
+		// One limiter for both stream routes so they share a per-user budget.
+		Streams: ratelimit.StreamsPerUser(rl.StreamsPerUser),
+	})
 	notificationHandler.RegisterRoutes(v1, requireAuth, requireStaff...)
 	ownerHandler.RegisterRoutes(v1, requireAdmin...)
 	// Public landing-page form: 10 submissions per IP per hour.
@@ -182,10 +200,13 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	qrCodeHandler.RegisterRoutes(v1, requireAdmin, requireStaff, scanLimit)
 	qrCodeHandler.RegisterShortLinkRoutes(router, scanLimit)
 
+	v1.Group(func(signedIn chi.Router) {
+		signedIn.Use(authenticate)
+		authHandler.RegisterAuthenticatedRoutes(signedIn, notDisplay)
+		userHandler.RegisterRoutes(signedIn, notDisplay)
+	})
 	v1.Group(func(protected chi.Router) {
 		protected.Use(requireAuth)
-		authHandler.RegisterAuthenticatedRoutes(protected)
-		userHandler.RegisterRoutes(protected)
 		carHandler.RegisterRoutes(protected)
 		deviceHandler.RegisterRoutes(protected)
 	})

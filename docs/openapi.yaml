@@ -77,7 +77,9 @@ paths:
         sends it via the configured `sms.Sender` (a stdout stub in dev — the
         code never appears in the response). Rate-limited: 429
         `otp_cooldown` if an unconsumed code for that phone was issued
-        within the last `OTP_COOLDOWN` (default 60s).
+        within the last `OTP_COOLDOWN` (default 60s), or a per-phone
+        (`OTP_MAX_PER_PHONE_HOUR` 5, `OTP_MAX_PER_PHONE_DAY` 10) or global
+        (`OTP_MAX_PER_DAY` 1000) cap on issued codes is reached.
       requestBody:
         required: true
         content:
@@ -256,6 +258,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/me:
     get:
@@ -405,7 +408,7 @@ paths:
     get:
       tags: [Washing points]
       operationId: getWashingPointCredentials
-      summary: Get a washing point's staff/worker login usernames
+      summary: Get a washing point's login usernames
       description: >
         Requires role staff or admin. Usernames only — passwords are never
         retrievable after the one-time reveal at creation/reset (see
@@ -425,7 +428,8 @@ paths:
                 properties:
                   staff: { type: object, nullable: true, properties: { username: { type: string } }, required: [username] }
                   worker: { type: object, nullable: true, properties: { username: { type: string } }, required: [username] }
-                required: [staff, worker]
+                  display: { type: object, nullable: true, properties: { username: { type: string } }, required: [username] }
+                required: [staff, worker, display]
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -436,11 +440,11 @@ paths:
       - name: role
         in: path
         required: true
-        schema: { type: string, enum: [staff, worker] }
+        schema: { type: string, enum: [staff, worker, display] }
     post:
       tags: [Washing points]
       operationId: createWashingPointCredentials
-      summary: Create a washing point's missing staff or worker login
+      summary: Create a washing point's missing login
       description: >
         Requires role staff or admin. For a point that has no account for
         the role (see the nullable fields of GET .../credentials). Returns
@@ -466,11 +470,11 @@ paths:
       - name: role
         in: path
         required: true
-        schema: { type: string, enum: [staff, worker] }
+        schema: { type: string, enum: [staff, worker, display] }
     post:
       tags: [Washing points]
       operationId: resetWashingPointCredentials
-      summary: Regenerate a washing point's staff or worker password
+      summary: Regenerate a washing point account's password
       description: >
         Requires role staff or admin. Generates a new random password for
         that account and revokes all of its existing refresh tokens (any
@@ -480,8 +484,17 @@ paths:
         above. For a logged-in account changing its *own* password (knows
         the current one), see `PATCH /auth/password` instead — this
         endpoint is for a forgotten password or an admin acting on
-        someone else's account.
+        someone else's account. Resetting the caller's own account requires
+        current_password, else 403 current_password_required.
       security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password: { type: string }
       responses:
         "200":
           description: OK
@@ -492,6 +505,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/washing-points/{id}/availability:
     parameters:
@@ -535,6 +549,7 @@ paths:
               schema: { $ref: "#/components/schemas/AvailabilityList" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/washing-points/{id}/schedule:
     parameters:
@@ -917,14 +932,17 @@ paths:
         client field) as a `customer` user, all inside the booking's
         transaction. The phone may be typed without a country code — the API
         normalizes it to E.164 (bare local numbers get `+992`). `car_name`
-        and `plate` are both optional; when either is given the client's car
-        is upserted (matched by plate, else by name), otherwise the booking
-        has no car (`car_id` reports the zero UUID). Same service /
+        and `plate` are both optional; when either is given, the client's car
+        matching both is reused (never rewritten) or a new one created,
+        otherwise the booking has no car (`car_id` reports the zero UUID).
+        `scheduled_start_at` must be within the last 24 hours or the next 60
+        days. Manual bookings do not take the client's one-active-booking
+        slot. Same service /
         price-option / box / operating-hours / overlap validation as
         `POST /queue`, but `scheduled_start_at` may be now or in the past
         (walk-ins). Always created with status `queue` and source
         `manual`. 409 `slot_unavailable`, 409 `active_booking_exists`
-        (client already has an active booking), 409 `phone_not_customer`
+        (client already has an active booking at this point), 409 `phone_not_customer`
         (phone belongs to a staff/worker/admin account).
 
         With `overflow: true` the booking goes into the point's virtual
@@ -1030,10 +1048,10 @@ paths:
       operationId: getDisplayBoard
       summary: Lobby-display kiosk's summary screen
       description: >
-        Requires role `staff` or `admin` (docs/PLAN_WEB_APPS.md phase 8) —
+        Requires role `staff`, `admin` or `display` (docs/PLAN_WEB_APPS.md phase 8) —
         unlike boxes/live and the per-point queue board, `worker` cannot
-        reach this one, since the display kiosk logs in as staff/admin, not
-        a new role. Boxes joined with today's currently-washing booking
+        reach this one. The kiosk logs in with the point's `display`
+        account. Boxes joined with today's currently-washing booking
         (current, nil = free) plus a flat, scheduled_start_at-ordered
         waiting list across every box for the rest of today. No
         ticket-number field exists anywhere in the data model; customer
@@ -1078,6 +1096,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/washing-points/{id}/reports:
     parameters:
@@ -1415,6 +1434,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/queue/{id}:
     parameters:
@@ -1467,6 +1487,7 @@ paths:
               schema: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/queue/{id}/cancel:
     parameters:
@@ -2457,7 +2478,7 @@ components:
         id: { type: string, format: uuid }
         phone_number: { type: string, nullable: true, example: "+15551234567", description: "Omitted/null for staff, worker, and admin accounts — only customers have one." }
         name: { type: string, nullable: true }
-        role: { type: string, enum: [customer, staff, admin, worker] }
+        role: { type: string, enum: [customer, staff, admin, worker, display] }
         washing_point_id: { type: string, format: uuid, nullable: true }
         last_login_at: { type: string, format: date-time, nullable: true }
       required: [id, role]
@@ -2523,7 +2544,7 @@ components:
         address: { type: string, maxLength: 500 }
         latitude: { type: number, minimum: -90, maximum: 90 }
         longitude: { type: number, minimum: -180, maximum: 180 }
-        boxes_count: { type: integer, minimum: 1, default: 2 }
+        boxes_count: { type: integer, minimum: 1, maximum: 100, default: 2 }
         open_time: { type: string, default: "08:00", example: "08:00" }
         close_time: { type: string, default: "20:00", example: "20:00" }
         status: { type: string, enum: [active, paused, pending_review], default: active }
@@ -2542,7 +2563,7 @@ components:
         address: { type: string, maxLength: 500 }
         latitude: { type: number, minimum: -90, maximum: 90 }
         longitude: { type: number, minimum: -180, maximum: 180 }
-        boxes_count: { type: integer, minimum: 1 }
+        boxes_count: { type: integer, minimum: 1, maximum: 100 }
         open_time: { type: string }
         close_time: { type: string }
         status: { type: string, enum: [active, paused, pending_review] }
@@ -2563,7 +2584,7 @@ components:
       type: object
       properties:
         name: { type: string, maxLength: 255 }
-        price_cents: { type: integer, minimum: 0 }
+        price_cents: { type: integer, minimum: 0, maximum: 100000000 }
         is_default: { type: boolean, default: false }
       required: [name, price_cents]
 
@@ -2575,7 +2596,7 @@ components:
       type: object
       properties:
         name: { type: string, maxLength: 255 }
-        price_cents: { type: integer, minimum: 0 }
+        price_cents: { type: integer, minimum: 0, maximum: 100000000 }
         is_default:
           type: boolean
           description: Explicitly setting false on the current sole default is rejected (400 cannot_unset_default).
@@ -2611,8 +2632,8 @@ components:
       properties:
         name: { type: string, maxLength: 255 }
         description: { type: string, maxLength: 2000 }
-        duration_minutes: { type: integer, minimum: 1 }
-        queue_minutes: { type: integer, minimum: 1, description: Optional; defaults to duration_minutes when omitted. }
+        duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
+        queue_minutes: { type: integer, minimum: 1, maximum: 1440, description: Optional; defaults to duration_minutes when omitted. }
         picture_url: { type: string, maxLength: 500 }
         price_options:
           type: array
@@ -2625,8 +2646,8 @@ components:
       properties:
         name: { type: string, maxLength: 255 }
         description: { type: string, maxLength: 2000 }
-        duration_minutes: { type: integer, minimum: 1 }
-        queue_minutes: { type: integer, minimum: 0, description: 0 clears the override (back to duration_minutes). }
+        duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
+        queue_minutes: { type: integer, minimum: 0, maximum: 1440, description: 0 clears the override (back to duration_minutes). }
         picture_url: { type: string, maxLength: 500 }
         is_active: { type: boolean }
 
@@ -3045,7 +3066,7 @@ components:
         contact_name: { type: string, maxLength: 255 }
         contact_phone: { type: string, maxLength: 32 }
         address: { type: string, maxLength: 500 }
-        boxes_count: { type: integer, minimum: 1 }
+        boxes_count: { type: integer, minimum: 1, maximum: 100 }
         note: { type: string, maxLength: 2000 }
       required: [business_name, contact_name, contact_phone, address, boxes_count]
 
@@ -3064,7 +3085,7 @@ components:
         contact_name: { type: string, maxLength: 255 }
         contact_phone: { type: string, maxLength: 32 }
         address: { type: string, maxLength: 500 }
-        boxes_count: { type: integer, minimum: 1 }
+        boxes_count: { type: integer, minimum: 1, maximum: 100 }
         note: { type: string, maxLength: 2000 }
 
     QrCodeStats:

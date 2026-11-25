@@ -55,6 +55,24 @@ func RequireAuth(jwtManager *jwt.Manager) func(http.Handler) http.Handler {
 	}
 }
 
+// ForbidRole must be chained after RequireAuth. It rejects one role with 403,
+// for routes open to every other authenticated user.
+func ForbidRole(forbidden string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authUser, ok := httputil.AuthUser(w, r)
+			if !ok {
+				return
+			}
+			if authUser.Role == forbidden {
+				httputil.WriteError(w, r, apperror.Forbidden("forbidden", "you do not have permission to perform this action"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequireRole must be chained after RequireAuth. It rejects the request
 // with 403 unless the authenticated user's role is one of allowed.
 func RequireRole(allowed ...string) func(http.Handler) http.Handler {

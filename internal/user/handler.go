@@ -22,9 +22,10 @@ func NewHandler(repo *Repository) *Handler {
 // RegisterRoutes mounts /me under r. The caller is responsible for wrapping
 // r with an auth-required middleware — these handlers assume an AuthUser is
 // already present in the request context.
-func (h *Handler) RegisterRoutes(r chi.Router) {
+// writeGuard additionally wraps the profile update.
+func (h *Handler) RegisterRoutes(r chi.Router, writeGuard func(http.Handler) http.Handler) {
 	r.Get("/me", h.getMe)
-	r.Patch("/me", h.updateMe)
+	r.With(writeGuard).Patch("/me", h.updateMe)
 }
 
 type response struct {
