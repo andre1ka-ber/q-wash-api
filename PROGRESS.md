@@ -519,3 +519,9 @@ price per booking and count revenue/count per item per service. `queue.Repositor
 - 2026-11-25 — Rate limits on current-password checks, availability, bookings per hour and open event streams
   (`RATE_LIMIT_*`). Tests: `ratelimit/peruser_test.go`, integration `user_limits_test.go`. Docs: `API.md`, `openapi.yaml`,
   `README.md`, platform `docs/edge-cases.md`.
+
+- 2026-11-26 — **Customer passkeys**: migration `000036_passkeys`, `/auth/passkeys/*` (login, register, list, delete) and the two
+  `/.well-known/` association files (`internal/auth/passkey_*.go`, `config.PasskeyConfig`), off unless `PASSKEY_*` is set. New
+  dependency `github.com/go-webauthn/webauthn` v0.18.2 (pulled `x/crypto`, `x/sync`, `x/sys`, `x/text`, `testify` up).
+  Tests: unit `config/passkey_test.go`, `auth/passkey_test.go`; integration `passkey_test.go` (software authenticator). Not yet
+  tried with a real phone. Docs: `API.md`, `openapi.yaml`, `DATA_MODEL.md`, `README.md`, `.env.example`, platform `docs/`.

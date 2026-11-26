@@ -16,7 +16,7 @@ tags:
   - name: Meta
     description: Operational endpoints not under /api/v1.
   - name: Auth
-    description: Phone + SMS-OTP login, no passwords. JWT access tokens, opaque rotating refresh tokens.
+    description: Customer login by phone + SMS-OTP or passkey; JWT access tokens, opaque rotating refresh tokens.
   - name: Users
     description: The authenticated caller's own profile.
   - name: Washing points
@@ -167,6 +167,139 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/passkeys/login/options:
+    post:
+      tags: [Auth]
+      operationId: passkeyLoginOptions
+      summary: Start a passkey sign-in
+      responses:
+        "200":
+          description: Request options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PasskeyOptions" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/passkeys/login/verify:
+    post:
+      tags: [Auth]
+      operationId: passkeyLoginVerify
+      summary: Finish a passkey sign-in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasskeyVerify" }
+      responses:
+        "200":
+          description: Token pair issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/passkeys/register/options:
+    post:
+      tags: [Auth]
+      operationId: passkeyRegisterOptions
+      summary: Start creating a passkey (customer)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Creation options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PasskeyOptions" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/auth/passkeys/register/verify:
+    post:
+      tags: [Auth]
+      operationId: passkeyRegisterVerify
+      summary: Store a new passkey (customer)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasskeyVerify" }
+      responses:
+        "201":
+          description: Passkey stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Passkey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/auth/passkeys:
+    get:
+      tags: [Auth]
+      operationId: listPasskeys
+      summary: List own passkeys (customer)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Oldest first
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Passkey" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/auth/passkeys/{id}:
+    delete:
+      tags: [Auth]
+      operationId: deletePasskey
+      summary: Delete own passkey (customer)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204":
+          description: Deleted
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /.well-known/apple-app-site-association:
+    get:
+      tags: [Meta]
+      operationId: appleAppSiteAssociation
+      summary: iOS app association for passkeys
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /.well-known/assetlinks.json:
+    get:
+      tags: [Meta]
+      operationId: androidAssetLinks
+      summary: Android app association for passkeys
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/auth/refresh:
     post:
@@ -2482,6 +2615,31 @@ components:
         washing_point_id: { type: string, format: uuid, nullable: true }
         last_login_at: { type: string, format: date-time, nullable: true }
       required: [id, role]
+
+    PasskeyOptions:
+      type: object
+      properties:
+        challenge_id: { type: string, format: uuid }
+        public_key: { type: object, description: "WebAuthn creation or request options, JSON form (base64url)." }
+      required: [challenge_id, public_key]
+
+    PasskeyVerify:
+      type: object
+      properties:
+        challenge_id: { type: string, format: uuid }
+        credential: { type: object, description: "The authenticator's PublicKeyCredential, JSON form (base64url)." }
+      required: [challenge_id, credential]
+
+    Passkey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        credential_id: { type: string, description: base64url }
+        platform: { type: string, enum: [android, ios, web, other] }
+        provider: { type: string, example: iCloud Keychain }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+      required: [id, credential_id, platform, created_at]
 
     TokenPair:
       type: object

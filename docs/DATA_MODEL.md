@@ -77,6 +77,26 @@ without a separate blocklist anyway.
 | revoked_at | timestamp, nullable | set on logout/rotation |
 | created_at | timestamp | |
 
+### Passkey (`passkeys`)
+
+A customer's WebAuthn credential (migration `000036_passkeys`); at most 10 per user.
+
+| field | type | notes |
+|---|---|---|
+| id | uuid | pk |
+| user_id | uuid | fk users, cascade delete |
+| credential_id | bytea | unique |
+| credential | jsonb | the `go-webauthn` credential record: public key, sign counter, backup flags, AAGUID |
+| platform | string | `android`, `ios`, `web`, `other`: the client that created it |
+| last_used_at | timestamptz | null until first sign-in |
+| created_at, updated_at | timestamptz | |
+
+### PasskeyChallenge (`passkey_challenges`)
+
+One pending ceremony: `id`, `user_id` (null for sign-in), `purpose` (`register`/`login`), `session` (jsonb),
+`expires_at` (5 minutes), `created_at`. Deleted by the first verify attempt; expired rows are removed whenever
+a new challenge is created.
+
 ### WashingPoint
 Modeled for a multi-point network with owners (see `PLAN_WEB_APPS.md`), though
 `internal/queue`'s availability algorithm still treats each point in
@@ -375,6 +395,7 @@ User 1---N Car
 User 1---N Queue
 User 1---N Notification
 User 1---N RefreshToken
+User 1---N Passkey
 WashingPoint 1---N User (staff/worker, via washing_point_id)
 
 WashingPoint 1---N Service

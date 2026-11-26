@@ -21,6 +21,7 @@ type Config struct {
 	SMS        SMSConfig
 	Monitoring MonitoringConfig
 	RateLimit  RateLimitConfig
+	Passkey    PasskeyConfig
 }
 
 // RateLimitConfig sets the abuse limits.
@@ -41,6 +42,7 @@ type RateLimitConfig struct {
 	AvailabilityPerMinute int           // GET .../availability, per IP (default 120)
 	BookingsPerHour       int           // own bookings created per user (default 10)
 	StreamsPerUser        int           // open event streams per user (default 10)
+	PasskeyLoginPerMinute int           // each of POST /auth/passkeys/login/*, per IP (default 20)
 }
 
 type HTTPConfig struct {
@@ -173,6 +175,9 @@ func (c Config) Validate() error {
 	if err := c.RateLimit.validate(); err != nil {
 		return err
 	}
+	if err := c.Passkey.validate(); err != nil {
+		return err
+	}
 	if c.Auth.OTPMaxPerPhoneHour < 0 || c.Auth.OTPMaxPerPhoneDay < 0 || c.Auth.OTPMaxPerDay < 0 {
 		return errors.New("OTP_MAX_PER_* values must not be negative (0 turns a cap off)")
 	}
@@ -230,7 +235,7 @@ func (r RateLimitConfig) validate() error {
 	if r.LoginPerMinute < 0 || r.LoginMaxFailures < 0 || r.LoginLockout < 0 ||
 		r.OTPRequestPerHour < 0 || r.OTPVerifyPerHour < 0 || r.QRScanPerMinute < 0 ||
 		r.PasswordMaxFailures < 0 || r.PasswordLockout < 0 || r.AvailabilityPerMinute < 0 ||
-		r.BookingsPerHour < 0 || r.StreamsPerUser < 0 {
+		r.BookingsPerHour < 0 || r.StreamsPerUser < 0 || r.PasskeyLoginPerMinute < 0 {
 		return errors.New("RATE_LIMIT_* values must not be negative (0 turns a limit off)")
 	}
 	return nil
@@ -289,6 +294,12 @@ func Load() (Config, error) {
 			PayomOTPCodeVar:    getEnv("PAYOM_OTP_CODE_VARIABLE", "code"),
 		},
 		Monitoring: MonitoringConfig{DSN: getEnv("SENTRY_DSN", "")},
+		Passkey: PasskeyConfig{
+			RPID:              getEnv("PASSKEY_RP_ID", ""),
+			IOSAppID:          getEnv("PASSKEY_IOS_APP_ID", ""),
+			AndroidPackage:    getEnv("PASSKEY_ANDROID_PACKAGE", ""),
+			AndroidCertSHA256: getCSV("PASSKEY_ANDROID_CERT_SHA256", nil),
+		},
 	}
 
 	var err error
@@ -347,6 +358,7 @@ func Load() (Config, error) {
 		{&rl.AvailabilityPerMinute, "RATE_LIMIT_AVAILABILITY_PER_MINUTE", 120},
 		{&rl.BookingsPerHour, "RATE_LIMIT_BOOKINGS_PER_HOUR", 10},
 		{&rl.StreamsPerUser, "RATE_LIMIT_STREAMS_PER_USER", 10},
+		{&rl.PasskeyLoginPerMinute, "RATE_LIMIT_PASSKEY_LOGIN_PER_MINUTE", 20},
 	} {
 		if *f.dst, err = getInt(f.env, f.fallback); err != nil {
 			return Config{}, err

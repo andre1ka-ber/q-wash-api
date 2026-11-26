@@ -43,6 +43,7 @@ In-memory and per API process (several replicas each count separately). Every re
 | `POST /auth/otp/request` | codes per phone, last hour and last 24 hours (stored codes, survives restarts) | `OTP_MAX_PER_PHONE_HOUR` (5), `OTP_MAX_PER_PHONE_DAY` (10) | `otp_cooldown` |
 | `POST /auth/otp/request` | codes across all phones per day (SMS cost budget, per process) | `OTP_MAX_PER_DAY` (1000) | `otp_cooldown` |
 | `POST /auth/otp/verify` | per client IP, on top of the per-code `OTP_MAX_ATTEMPTS` | `RATE_LIMIT_OTP_VERIFY_PER_HOUR` (20 / hour) | `too_many_requests` |
+| `POST /auth/passkeys/login/options`, `.../verify` | per client IP, a separate budget for each | `RATE_LIMIT_PASSKEY_LOGIN_PER_MINUTE` (20 / minute) | `too_many_requests` |
 | `GET /q/{token}`, `GET /qr-codes/scan/{token}` | per client IP, one shared budget | `RATE_LIMIT_QR_SCAN_PER_MINUTE` (60 / minute) | `too_many_requests` |
 | `POST /connection-requests/apply` | per client IP (unchanged) | fixed 10 / hour | `too_many_requests` |
 | `GET /washing-points/{id}/availability` | per client IP | `RATE_LIMIT_AVAILABILITY_PER_MINUTE` (120 / minute) | `too_many_requests` |
@@ -62,7 +63,24 @@ Notes:
 
 - **Access-token life:** `JWT_ACCESS_TTL` (default 15m) for customers, `JWT_STAFF_ACCESS_TTL` (default 5m) for `staff`/`worker`/`admin`. A token's role and washing point are trusted until it expires (no DB check per request), so a demoted or removed staff member keeps access for at most that long. Clients refresh on 401 as before; the response's `access_token_expires_at` is authoritative.
 - **Refresh rotation is atomic:** if the same refresh token is presented twice at once, exactly one request gets a new pair and the other gets 401 `invalid_refresh_token`. Presenting an already-revoked token is also 401 and is logged as `auth.refresh_reuse`; it does **not** revoke the user's other sessions (a revoked token may be stale from a logout, rotation or password change, so it is not proof of theft).
-- **Audit events** are `slog` records with message `audit` and an `event` attribute, plus client `ip` and `request_id`: `auth.login`, `auth.login_failed` (with submitted `username` and error `code`, e.g. `login_locked`), `auth.otp_requested`, `auth.otp_request_failed`, `auth.otp_login`, `auth.otp_verify_failed` (phone masked to the last 4 digits), `auth.refresh_failed`, `auth.refresh_reuse`, `auth.password_changed`, `auth.password_change_failed`, `credentials.reset` (actor, target user, washing point). Failures log at WARN. Passwords, OTP codes and tokens are never logged.
+- **Audit events** are `slog` records with message `audit` and an `event` attribute, plus client `ip` and `request_id`: `auth.login`, `auth.login_failed` (with submitted `username` and error `code`, e.g. `login_locked`), `auth.otp_requested`, `auth.otp_request_failed`, `auth.otp_login`, `auth.otp_verify_failed` (phone masked to the last 4 digits), `auth.refresh_failed`, `auth.refresh_reuse`, `auth.password_changed`, `auth.password_change_failed`, `auth.passkey_login`, `auth.passkey_login_failed`, `auth.passkey_registered`, `auth.passkey_register_failed`, `auth.passkey_deleted`, `credentials.reset` (actor, target user, washing point). Failures log at WARN. Passwords, OTP codes and tokens are never logged.
+
+### Passkeys — implemented
+
+Customers can sign in with a passkey (WebAuthn, discoverable credential) instead of an SMS code; SMS login keeps working. All endpoints answer 404 `passkeys_disabled` unless the four `PASSKEY_*` settings are set.
+
+| method | path | auth | notes |
+|---|---|---|---|
+| POST | `/auth/passkeys/login/options` | public | no body. 200 `{challenge_id, public_key}`; `public_key` is a WebAuthn `PublicKeyCredentialRequestOptions` in its JSON form (base64url). No phone number is asked. |
+| POST | `/auth/passkeys/login/verify` | public | body `{challenge_id, credential}`; `credential` is the authenticator's `PublicKeyCredential` in JSON form. 200 token pair, same shape as OTP verify. 400 `passkey_challenge_invalid` (unknown, used or older than 5 minutes), `passkey_unknown` (deleted or never registered), `passkey_invalid` (origin, signature, user verification or sign-counter check failed); 403 `forbidden` if the account is no longer a `customer`. |
+| POST | `/auth/passkeys/register/options` | customer | no body. 200 `{challenge_id, public_key}` (`PublicKeyCredentialCreationOptions`; existing passkeys are excluded). 409 `passkey_limit` at 10 passkeys. |
+| POST | `/auth/passkeys/register/verify` | customer | body `{challenge_id, credential}`. 201 the new passkey. 400 `passkey_challenge_invalid`, `passkey_invalid`; 409 `passkey_exists`, `passkey_limit`. |
+| GET | `/auth/passkeys` | customer | 200 array, oldest first: `{id, credential_id, platform, provider, created_at, last_used_at}`. `platform` is the creating client's `X-Client-Platform` bucket; `provider` (e.g. `iCloud Keychain`) and `last_used_at` are omitted when unknown or never used. |
+| DELETE | `/auth/passkeys/{id}` | customer, own | 204. 404 `passkey_not_found`, also for another customer's passkey. Sessions already open stay valid; the key stays in the phone's password manager. |
+
+A challenge is consumed by the first verify attempt, successful or not. User verification (face, fingerprint or device code) is required.
+
+Outside `/api/v1`, public, for the passkey domain (`PASSKEY_RP_ID`): `GET /.well-known/apple-app-site-association` and `GET /.well-known/assetlinks.json`. That domain must serve both over HTTPS with no redirect.
 
 ## Users — implemented (Phase 3)
 
@@ -546,4 +564,4 @@ Detail/response shape (list items omit `stats`):
 
 ## Client headers (login tracking)
 
-Every client may send `X-Client-Platform` (`android` | `ios` | `web`) and `X-App-Version` (e.g. `2.4.1`, max 32 chars of `[0-9A-Za-z.+_-]`) on its requests. On a successful login (`POST /auth/login`, OTP verify) the API stores one `login_events` row (user, role, washing point, platform, version, time) and the same platform/version on the user (`last_platform`, `last_app_version`) — that feeds `GET /admin/analytics/platform`. Without the headers the platform is guessed from the User-Agent (`web` for a browser, else `other`). The raw User-Agent and the IP are never stored. Both headers are allowed by CORS.
+Every client may send `X-Client-Platform` (`android` | `ios` | `web`) and `X-App-Version` (e.g. `2.4.1`, max 32 chars of `[0-9A-Za-z.+_-]`) on its requests. On a successful login (`POST /auth/login`, OTP verify, passkey verify) the API stores one `login_events` row (user, role, washing point, platform, version, time) and the same platform/version on the user (`last_platform`, `last_app_version`) — that feeds `GET /admin/analytics/platform`. Without the headers the platform is guessed from the User-Agent (`web` for a browser, else `other`). The raw User-Agent and the IP are never stored. Both headers are allowed by CORS.

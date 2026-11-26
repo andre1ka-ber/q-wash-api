@@ -338,6 +338,12 @@ func (s *Service) loginByPhone(ctx context.Context, phone string, now time.Time)
 	if err != nil {
 		return nil, err
 	}
+	return s.signIn(ctx, u, now)
+}
+
+// signIn records the login of an already authenticated customer and issues a
+// token pair.
+func (s *Service) signIn(ctx context.Context, u *user.User, now time.Time) (*TokenPair, error) {
 	if err := s.userRepo.UpdateLastLogin(ctx, u.ID, now); err != nil {
 		return nil, err
 	}

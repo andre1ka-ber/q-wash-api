@@ -81,6 +81,12 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 	passwordLockout := ratelimit.NewLockout(cfg.RateLimit.PasswordMaxFailures, cfg.RateLimit.PasswordLockout)
 	authService.SetPasswordLockout(passwordLockout)
 	authHandler := auth.NewHandler(authService, jwtManager)
+	passkeyService, err := auth.NewPasskeyService(authService, authRepo, userRepo, cfg.Passkey)
+	if err != nil {
+		// config.Load validates the passkey settings, so this is a wiring bug.
+		panic(err)
+	}
+	passkeyHandler := auth.NewPasskeyHandler(passkeyService, cfg.Passkey)
 
 	wpRepo := washingpoint.NewRepository(database)
 
@@ -179,6 +185,10 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 		OTPRequest: ratelimit.PerIP(rl.OTPRequestPerHour, time.Hour),
 		OTPVerify:  ratelimit.PerIP(rl.OTPVerifyPerHour, time.Hour),
 	})
+	passkeyHandler.RegisterPublicRoutes(v1,
+		ratelimit.PerIP(rl.PasskeyLoginPerMinute, time.Minute),
+		ratelimit.PerIP(rl.PasskeyLoginPerMinute, time.Minute))
+	passkeyHandler.RegisterWellKnownRoutes(router)
 	wpHandler.RegisterRoutes(v1, requireStaff...)
 	serviceHandler.RegisterRoutes(v1, requireStaff...)
 	queueHandler.RegisterRoutes(v1, requireAuth, requireStaff, requireQueueOps, requireBoard, queue.Limits{
@@ -209,6 +219,10 @@ func New(database *gorm.DB, cfg config.Config, smsSender sms.Sender, otpSender s
 		protected.Use(requireAuth)
 		carHandler.RegisterRoutes(protected)
 		deviceHandler.RegisterRoutes(protected)
+	})
+	v1.Group(func(customers chi.Router) {
+		customers.Use(requireAuth, auth.RequireRole(string(user.RoleCustomer)))
+		passkeyHandler.RegisterCustomerRoutes(customers)
 	})
 
 	return router, Jobs{NoShow: queue.NewNoShowSweeper(queueManager, time.Minute)}

@@ -156,6 +156,12 @@ staff/worker/admin accounts; `JWT_ACCESS_TTL` (15m) applies to customers.
 `OTP_MAX_PER_PHONE_HOUR`, `OTP_MAX_PER_PHONE_DAY` and `OTP_MAX_PER_DAY`
 (defaults 5, 10, 1000; `0` turns one off) cap how many login codes are sent.
 
+`PASSKEY_RP_ID`, `PASSKEY_IOS_APP_ID`, `PASSKEY_ANDROID_PACKAGE` and
+`PASSKEY_ANDROID_CERT_SHA256` turn on customer passkey sign-in (all four or
+none; see `.env.example` and `docs/API.md`, "Passkeys").
+`RATE_LIMIT_PASSKEY_LOGIN_PER_MINUTE` (20) limits each public passkey
+endpoint per IP.
+
 Two settings matter for a production deploy behind a reverse proxy:
 - `TRUST_PROXY_HEADERS` (default `true` outside production, `false` in
   production): set it to `true` when a single reverse proxy that sets

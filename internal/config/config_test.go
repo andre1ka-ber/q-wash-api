@@ -187,7 +187,7 @@ func TestLoadProxyTrustAndRateLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := RateLimitConfig{LoginPerMinute: 10, LoginMaxFailures: 5, LoginLockout: 15 * time.Minute, OTPRequestPerHour: 5, OTPVerifyPerHour: 20, QRScanPerMinute: 60,
-			PasswordMaxFailures: 5, PasswordLockout: 15 * time.Minute, AvailabilityPerMinute: 120, BookingsPerHour: 10, StreamsPerUser: 10}
+			PasswordMaxFailures: 5, PasswordLockout: 15 * time.Minute, AvailabilityPerMinute: 120, BookingsPerHour: 10, StreamsPerUser: 10, PasskeyLoginPerMinute: 20}
 		if cfg.RateLimit != want {
 			t.Fatalf("got %+v, want %+v", cfg.RateLimit, want)
 		}
